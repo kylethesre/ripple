@@ -1,150 +1,47 @@
-type MidiNote = {
-  id?: string;
-  pitch: number;
-  startBeat: number;
-  lengthBeats: number;
-  velocity?: number;
-};
-
-type BlockShape = {
-  id: bigint;
-  trackId: bigint;
-  kind: string;
-  name: string;
-  startBeat: number;
-  lengthBeats: number;
-  midiJson: string;
-  assetId: bigint;
-};
-
-type TrackShape = {
-  id: bigint;
-  name: string;
-};
-
-function parseMidiNotes(midiJson: string): MidiNote[] {
-  try {
-    const value = JSON.parse(midiJson) as unknown;
-    const notes = Array.isArray(value)
-      ? value
-      : value && typeof value === 'object' && 'notes' in value
-        ? (value as { notes: unknown[] }).notes
-        : [];
-    return notes.filter(
-      (item): item is MidiNote =>
-        !!item &&
-        typeof item === 'object' &&
-        typeof (item as MidiNote).pitch === 'number' &&
-        typeof (item as MidiNote).startBeat === 'number' &&
-        typeof (item as MidiNote).lengthBeats === 'number'
-    );
-  } catch {
-    return [];
-  }
-}
-
-function pitchToFreq(pitch: number): number {
-  return 440 * Math.pow(2, (pitch - 69) / 12);
-}
-
-type DrumPattern = {
-  drums: boolean;
-  steps: number;
-  sounds: { id: string; name: string; strudel: string }[];
-  pattern: number[][];
-};
-
-function parseDrumPattern(midiJson: string): DrumPattern | null {
-  try {
-    const parsed = JSON.parse(midiJson) as Record<string, unknown>;
-    if (parsed.drums && Array.isArray(parsed.pattern)) return parsed as unknown as DrumPattern;
-  } catch { /* fall through */ }
-  return null;
-}
-
-function renderDrumHit(ctx: OfflineAudioContext, soundId: string, startSec: number, _beatsPerSec: number, mixed: GainNode) {
-  const amp = 0.4;
-  const dur = 0.15;
-
-  if (soundId === 'kick') {
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(150, startSec);
-    osc.frequency.exponentialRampToValueAtTime(40, startSec + dur);
-    gain.gain.setValueAtTime(amp, startSec);
-    gain.gain.exponentialRampToValueAtTime(0.001, startSec + dur);
-    osc.connect(gain);
-    gain.connect(mixed);
-    osc.start(startSec);
-    osc.stop(startSec + dur);
-  } else if (soundId === 'snare' || soundId === 'clap') {
-    const bufferSize = Math.ceil(ctx.sampleRate * dur);
-    const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
-    const data = buffer.getChannelData(0);
-    for (let i = 0; i < bufferSize; i++) data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / bufferSize, 3);
-    const source = ctx.createBufferSource();
-    source.buffer = buffer;
-    const gain = ctx.createGain();
-    gain.gain.setValueAtTime(amp, startSec);
-    gain.gain.exponentialRampToValueAtTime(0.001, startSec + dur);
-    source.connect(gain);
-    gain.connect(mixed);
-    source.start(startSec);
-  } else if (soundId === 'hihat') {
-    const bufferSize = Math.ceil(ctx.sampleRate * 0.06);
-    const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
-    const data = buffer.getChannelData(0);
-    for (let i = 0; i < bufferSize; i++) data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / bufferSize, 6);
-    const source = ctx.createBufferSource();
-    source.buffer = buffer;
-    const gain = ctx.createGain();
-    gain.gain.setValueAtTime(amp * 0.5, startSec);
-    gain.gain.exponentialRampToValueAtTime(0.001, startSec + 0.06);
-    const hp = ctx.createBiquadFilter();
-    hp.type = 'highpass';
-    hp.frequency.value = 7000;
-    source.connect(hp);
-    hp.connect(gain);
-    gain.connect(mixed);
-    source.start(startSec);
-  } else if (soundId === 'openhat') {
-    const bufferSize = Math.ceil(ctx.sampleRate * 0.25);
-    const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
-    const data = buffer.getChannelData(0);
-    for (let i = 0; i < bufferSize; i++) data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / bufferSize, 2);
-    const source = ctx.createBufferSource();
-    source.buffer = buffer;
-    const gain = ctx.createGain();
-    gain.gain.setValueAtTime(amp * 0.4, startSec);
-    gain.gain.exponentialRampToValueAtTime(0.001, startSec + 0.25);
-    const hp = ctx.createBiquadFilter();
-    hp.type = 'highpass';
-    hp.frequency.value = 6000;
-    source.connect(hp);
-    hp.connect(gain);
-    gain.connect(mixed);
-    source.start(startSec);
-  } else {
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = 'triangle';
-    osc.frequency.value = soundId === 'tomhi' ? 200 : 100;
-    gain.gain.setValueAtTime(amp, startSec);
-    gain.gain.exponentialRampToValueAtTime(0.001, startSec + dur);
-    osc.connect(gain);
-    gain.connect(mixed);
-    osc.start(startSec);
-    osc.stop(startSec + dur);
-  }
-}
+/**
+ * Audio playback engine — plays pre-rendered AudioBuffers with pause/resume/seek.
+ *
+ * Does NOT render audio itself; rendering is done by superdoughRenderer.ts.
+ * This module only handles scheduling pre-rendered buffers for playback.
+ */
 
 export type PlaybackHandle = {
+  audioCtx: AudioContext;
   sourceNodes: AudioBufferSourceNode[];
   gainNodes: GainNode[];
+  trackGains: Map<bigint, GainNode>;
+  /** Wall-clock time (audioCtx.currentTime) when playback last started/resumed */
+  startedAt: number;
+  /** The buffer offset (in seconds) we started from */
+  startOffset: number;
+  /**
+   * Stop all sources. After this the handle is dead — create a new one to play again.
+   */
   stop(): void;
+  /**
+   * Pause playback by suspending the AudioContext.
+   * Audio freezes in place; call resume() to continue.
+   */
+  pause(): Promise<void>;
+  /**
+   * Resume from where we paused.
+   */
+  resume(): Promise<void>;
+  /**
+   * Get current playback position in seconds (within the loop).
+   */
+  getCurrentTime(): number;
 };
 
+/**
+ * Start playing pre-rendered track buffers.
+ *
+ * Each track gets its own AudioBufferSourceNode + GainNode.
+ * Muted tracks get gain=0. Volume is applied to the gain node.
+ * The sources loop between 0 and totalSec.
+ *
+ * Returns a PlaybackHandle for pause/resume/stop and real-time gain control.
+ */
 export function schedulePlayback(
   audioCtx: AudioContext,
   trackBuffers: Map<bigint, AudioBuffer>,
@@ -155,11 +52,11 @@ export function schedulePlayback(
 ): PlaybackHandle {
   const sources: AudioBufferSourceNode[] = [];
   const gains: GainNode[] = [];
+  const trackGains = new Map<bigint, GainNode>();
   const totalSec = loopBeats / (bpm / 60);
 
   for (const [trackId, buffer] of trackBuffers) {
     const state = trackStates.get(trackId);
-    if (state?.muted) continue;
 
     const source = audioCtx.createBufferSource();
     source.buffer = buffer;
@@ -168,99 +65,65 @@ export function schedulePlayback(
     source.loopEnd = totalSec;
 
     const gain = audioCtx.createGain();
-    gain.gain.value = state?.volume ?? 0.72;
+    gain.gain.value = state?.muted ? 0 : (state?.volume ?? 0.72);
 
     source.connect(gain);
     gain.connect(audioCtx.destination);
 
-    const offset = Math.max(0, playheadSec);
+    const offset = Math.max(0, playheadSec) % totalSec;
     source.start(0, offset);
 
     sources.push(source);
     gains.push(gain);
+    trackGains.set(trackId, gain);
   }
 
+  const startedAt = audioCtx.currentTime;
+  const startOffset = Math.max(0, playheadSec) % totalSec;
+
   return {
+    audioCtx,
     sourceNodes: sources,
     gainNodes: gains,
+    trackGains,
+    startedAt,
+    startOffset,
     stop() {
       for (const s of sources) {
-        try { s.stop(); } catch {}
+        try { s.stop(); } catch { /* already stopped */ }
       }
+    },
+    async pause() {
+      if (audioCtx.state === 'running') {
+        await audioCtx.suspend();
+      }
+    },
+    async resume() {
+      if (audioCtx.state === 'suspended') {
+        await audioCtx.resume();
+      }
+    },
+    getCurrentTime() {
+      const elapsed = audioCtx.currentTime - startedAt;
+      return (startOffset + elapsed) % totalSec;
     },
   };
 }
 
-export async function renderAllTracks(
-  tracks: readonly TrackShape[],
-  blocks: readonly BlockShape[],
-  bpm: number,
-  loopBeats: number,
-  sampleRate: number
-): Promise<Map<bigint, AudioBuffer>> {
-  const results = new Map<bigint, AudioBuffer>();
-  const beatsPerSec = bpm / 60;
-  const totalSeconds = loopBeats / beatsPerSec;
-  const lengthSamples = Math.ceil(totalSeconds * sampleRate);
-
-  for (const track of tracks) {
-    const trackBlocks = blocks.filter(b => b.trackId === track.id);
-    if (!trackBlocks.length) continue;
-
-    const ctx = new OfflineAudioContext(2, lengthSamples, sampleRate);
-    const mixed = ctx.createGain();
-    mixed.gain.value = 1;
-    mixed.connect(ctx.destination);
-
-    for (const block of trackBlocks) {
-      if (block.kind === 'audio') continue;
-
-      const drumPattern = parseDrumPattern(block.midiJson);
-      if (drumPattern) {
-        const stepDur = block.lengthBeats / drumPattern.steps;
-        for (let si = 0; si < drumPattern.sounds.length; si++) {
-          const sound = drumPattern.sounds[si];
-          const row = drumPattern.pattern[si] ?? [];
-          for (let step = 0; step < drumPattern.steps; step++) {
-            if (row[step]) {
-              const startSec = (block.startBeat + step * stepDur) / beatsPerSec;
-              renderDrumHit(ctx, sound.id, startSec, beatsPerSec, mixed);
-            }
-          }
-        }
-      } else {
-        const notes = parseMidiNotes(block.midiJson);
-
-        for (const note of notes) {
-          const startSec = (block.startBeat + note.startBeat) / beatsPerSec;
-          const durSec = Math.max(0.02, note.lengthBeats / beatsPerSec);
-          const amp = Math.max(0.05, Math.min(1, note.velocity ?? 0.8));
-
-          const osc = ctx.createOscillator();
-          const gain = ctx.createGain();
-
-          osc.type = 'triangle';
-          osc.frequency.value = pitchToFreq(note.pitch);
-
-          gain.gain.setValueAtTime(0, startSec);
-          gain.gain.linearRampToValueAtTime(amp * 0.3, startSec + 0.005);
-          gain.gain.setValueAtTime(amp * 0.3, startSec + durSec * 0.7);
-          gain.gain.linearRampToValueAtTime(0, startSec + durSec);
-
-          osc.connect(gain);
-          gain.connect(mixed);
-          osc.start(startSec);
-          osc.stop(startSec + durSec);
-        }
-      }
-    }
-
-    const buffer = await ctx.startRendering();
-    results.set(track.id, buffer);
+/**
+ * Update track gains in real-time without re-rendering or re-scheduling.
+ */
+export function updatePlaybackGains(
+  handle: PlaybackHandle,
+  trackStates: Map<bigint, { muted: boolean; volume: number }>
+) {
+  for (const [trackId, gainNode] of handle.trackGains) {
+    const state = trackStates.get(trackId);
+    gainNode.gain.value = state?.muted ? 0 : (state?.volume ?? 0.72);
   }
-
-  return results;
 }
+
+// ─── Metronome ──────────────────────────────────────────────────────
 
 export function generateMetronomeBuffer(bpm: number, beatsPerBar: number, loopBeats: number, sampleRate: number): Promise<AudioBuffer> {
   const totalSeconds = loopBeats / (bpm / 60);
@@ -315,11 +178,27 @@ export function scheduleMetronome(
   const offset = Math.max(0, playheadSec);
   source.start(0, offset);
 
+  const startedAt = audioCtx.currentTime;
+
   return {
+    audioCtx,
     sourceNodes: [source],
     gainNodes: [gain],
+    trackGains: new Map(),
+    startedAt,
+    startOffset: offset,
     stop() {
-      try { source.stop(); } catch {}
+      try { source.stop(); } catch { /* already stopped */ }
+    },
+    async pause() {
+      // Metronome pause handled by the shared AudioContext suspend
+    },
+    async resume() {
+      // Metronome resume handled by the shared AudioContext resume
+    },
+    getCurrentTime() {
+      const elapsed = audioCtx.currentTime - startedAt;
+      return (offset + elapsed) % totalSec;
     },
   };
 }

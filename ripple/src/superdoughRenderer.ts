@@ -1,4 +1,13 @@
-import { superdough, setAudioContext, initAudio, registerSynthSounds, samples } from 'superdough';
+import {
+  superdough,
+  setAudioContext,
+  getAudioContext,
+  initAudio,
+  registerSynthSounds,
+  samples,
+  resetGlobalEffects,
+  setSuperdoughAudioController,
+} from 'superdough';
 
 type MidiNote = {
   id?: string;
@@ -19,6 +28,11 @@ type BlockShape = {
   assetId: bigint;
   instrumentKind?: string;
   instrumentKey?: string;
+};
+
+type TrackShape = {
+  id: bigint;
+  name: string;
 };
 
 function parseMidiNotes(midiJson: string): MidiNote[] {
@@ -49,12 +63,25 @@ const DRUM_MAP: Record<number, string> = {
 };
 
 const MELODY_SOUNDS: Record<string, string> = {
-  piano: 'triangle', synth: 'sawtooth', bass: 'triangle', strings: 'sawtooth',
-  pad: 'sawtooth', organ: 'triangle', flute: 'sine', pluck: 'triangle',
+  piano: 'wt_piano',
+  epiano: 'wt_epiano',
+  synth: 'wt_fmsynth',
+  bass: 'wt_ebass',
+  dbass: 'wt_dbass',
+  strings: 'wt_stringbox',
+  violin: 'wt_violin',
+  cello: 'wt_cello',
+  pad: 'wt_theremin',
+  organ: 'wt_eorgan',
+  flute: 'wt_flute',
+  pluck: 'wt_clavinet',
+  vgame: 'wt_vgame',
+  aguitar: 'wt_aguitar',
+  eguitar: 'wt_eguitar',
 };
 
 let superdoughReady = false;
-let scheduledAbort: AbortController | null = null;
+/** The "real" AudioContext used for live playback — restored after offline renders. */
 let liveAudioCtx: AudioContext | null = null;
 
 async function ensureSuperdoughInit() {
@@ -68,96 +95,153 @@ async function ensureSuperdoughInit() {
   } catch (e) {
     console.warn('[superdough] sample load error:', e);
   }
+  console.log('[superdough] loading waveforms...');
+  try {
+    const res = await fetch('https://raw.githubusercontent.com/Bubobubobubobubo/Dough-Waveforms/main/strudel.json');
+    const data = await res.json() as Record<string, any>;
+    const baseUrl = data._base as string;
+    const flattened: Record<string, string[]> = {};
+    for (const [key, value] of Object.entries(data)) {
+      if (key === '_base') continue;
+      if (value && value.d2 && Array.isArray(value.d2)) {
+        flattened[key] = value.d2;
+      } else if (Array.isArray(value)) {
+        flattened[key] = value;
+      }
+    }
+    await samples(flattened, baseUrl);
+    console.log('[superdough] waveforms loaded');
+  } catch (e) {
+    console.warn('[superdough] waveform load error:', e);
+  }
   console.log('[superdough] initializing audio...');
   try { await initAudio(); console.log('[superdough] init OK'); } catch (e) { console.warn('[superdough] init error:', e); }
   superdoughReady = true;
 }
 
-export function stopAllLiveAudio() {
-  if (scheduledAbort) {
-    scheduledAbort.abort();
-    scheduledAbort = null;
+/**
+ * Ensure we have a live AudioContext and superdough is initialized.
+ */
+export async function ensureLiveContext(): Promise<AudioContext> {
+  if (!liveAudioCtx || liveAudioCtx.state === 'closed') {
+    liveAudioCtx = new AudioContext();
+    setAudioContext(liveAudioCtx);
   }
-  if (liveAudioCtx) {
-    liveAudioCtx.close();
-    liveAudioCtx = null;
-  }
+  await ensureSuperdoughInit();
+  return liveAudioCtx;
 }
 
-export async function scheduleBlocksLive(
+/**
+ * Get the current live AudioContext (may be null if not yet initialized).
+ */
+export function getLiveAudioContext(): AudioContext | null {
+  return liveAudioCtx;
+}
+
+/**
+ * Render a single track's blocks to an AudioBuffer using superdough + OfflineAudioContext.
+ *
+ * The key trick: we null out superdough's internal destination singleton
+ * (via resetGlobalEffects + setSuperdoughAudioController(null)) so it
+ * rebuilds fresh orbit/bus/destination nodes on the OfflineAudioContext.
+ * After rendering, we restore the live context and null it again so the
+ * live context gets fresh nodes too.
+ */
+export async function renderTrackBuffer(
   blocks: readonly BlockShape[],
-  playheadBeat: number,
   bpm: number,
   loopBeats: number,
-  trackMutedMap: Map<bigint, boolean>,
-) {
-  stopAllLiveAudio();
+  sampleRate: number,
+): Promise<AudioBuffer> {
   await ensureSuperdoughInit();
 
-  const ac = new AudioContext();
-  liveAudioCtx = ac;
-  setAudioContext(ac);
-  if (ac.state === 'suspended') await ac.resume();
-
-  const abort = new AbortController();
-  scheduledAbort = abort;
-
   const beatsPerSec = bpm / 60;
-  const loopSec = loopBeats / beatsPerSec;
+  const totalSeconds = loopBeats / beatsPerSec;
+  const lengthSamples = Math.ceil(totalSeconds * sampleRate);
 
-  const scheduleOnce = (startOffset: number) => {
-    const now = ac.currentTime + startOffset;
-    let count = 0;
+  const offlineCtx = new OfflineAudioContext(2, lengthSamples, sampleRate);
 
-    for (const block of blocks) {
-      if (block.kind === 'audio') continue;
-      if (trackMutedMap.get(block.trackId)) continue;
+  // Save the live context
+  const previousCtx = getAudioContext();
 
-      const notes = parseMidiNotes(block.midiJson);
-      const isSample = block.instrumentKind === 'sample';
-      const instrumentKey = block.instrumentKey ?? '';
-      const melodySound = MELODY_SOUNDS[instrumentKey] ?? 'triangle';
+  // Swap to offline context and force superdough to rebuild its internal
+  // destination/orbit nodes on the new context
+  setAudioContext(offlineCtx as unknown as AudioContext);
+  resetGlobalEffects();
+  setSuperdoughAudioController(null);
+  await initAudio();
 
-      for (const note of notes) {
-        const noteAbsoluteBeat = block.startBeat + note.startBeat;
-        const noteSec = noteAbsoluteBeat / beatsPerSec;
-        const noteDurSec = Math.max(0.02, note.lengthBeats / beatsPerSec);
-        const noteEndSec = noteSec + noteDurSec;
-        const playheadSec = playheadBeat / beatsPerSec;
+  // Schedule all notes for this track's blocks
+  const schedulePromises: Promise<void>[] = [];
 
-        if (noteEndSec <= playheadSec + 0.01) continue;
+  for (const block of blocks) {
+    if (block.kind === 'audio') continue;
 
-        const relativeStart = noteSec - playheadSec;
-        const schedTime = now + Math.max(0, relativeStart);
-        const remainingDur = noteDurSec - Math.max(0, -relativeStart);
-        const durSec = Math.max(0.02, remainingDur);
-        const gain = Math.max(0.05, Math.min(1, note.velocity ?? 0.8));
+    const notes = parseMidiNotes(block.midiJson);
+    const isSample = block.instrumentKind === 'sample';
+    const instrumentKey = block.instrumentKey ?? '';
+    const melodySound = MELODY_SOUNDS[instrumentKey] ?? 'triangle';
 
-        if (isSample) {
-          const sample = DRUM_MAP[Math.round(note.pitch)] ?? 'hh';
-          console.log(`[superdough] drum: ${sample} gain=${gain} dur=${durSec.toFixed(2)} time=${schedTime.toFixed(2)}`);
-          superdough({ s: sample, gain, duration: durSec }, schedTime, durSec).catch((e: unknown) => console.warn('[superdough] drum error:', e));
-        } else {
-          console.log(`[superdough] melody: s=${melodySound} note=${note.pitch} gain=${gain} time=${schedTime.toFixed(2)}`);
-          superdough({ s: melodySound, note: note.pitch, gain, duration: durSec }, schedTime, durSec).catch((e: unknown) => console.warn('[superdough] melody error:', e));
-        }
-        count++;
+    for (const note of notes) {
+      const noteAbsoluteBeat = block.startBeat + note.startBeat;
+      const noteSec = noteAbsoluteBeat / beatsPerSec;
+      const noteDurSec = Math.max(0.02, note.lengthBeats / beatsPerSec);
+      const gain = Math.max(0.05, Math.min(1, note.velocity ?? 0.8));
+
+      if (noteSec >= totalSeconds) continue;
+
+      if (isSample) {
+        const sample = DRUM_MAP[Math.round(note.pitch)] ?? 'hh';
+        schedulePromises.push(
+          superdough({ s: sample, gain, duration: noteDurSec }, noteSec, noteDurSec)
+            .catch((e: unknown) => console.warn('[superdough] offline drum error:', e))
+        );
+      } else {
+        schedulePromises.push(
+          superdough({ s: melodySound, note: note.pitch, gain, duration: noteDurSec }, noteSec, noteDurSec)
+            .catch((e: unknown) => console.warn('[superdough] offline melody error:', e))
+        );
       }
     }
-    return count;
-  };
+  }
 
-  const count = scheduleOnce(0);
-  console.log(`[superdough] scheduled ${count} notes, bpm=${bpm}, playheadBeat=${playheadBeat.toFixed(2)}, loop=${loopBeats}beats`);
+  await Promise.all(schedulePromises);
 
-  const scheduleNextLoop = () => {
-    if (abort.signal.aborted) return;
-    const ms = loopSec * 1000;
-    setTimeout(() => {
-      if (abort.signal.aborted) return;
-      scheduleOnce(0);
-      scheduleNextLoop();
-    }, ms);
-  };
-  scheduleNextLoop();
+  const buffer = await offlineCtx.startRendering();
+
+  // Restore the live context and force superdough to rebuild on it too
+  setAudioContext(previousCtx);
+  resetGlobalEffects();
+  setSuperdoughAudioController(null);
+
+  return buffer;
+}
+
+/**
+ * Render all tracks to AudioBuffers.
+ * Returns a Map from trackId → AudioBuffer.
+ */
+export async function renderAllTrackBuffers(
+  tracks: readonly TrackShape[],
+  blocks: readonly BlockShape[],
+  bpm: number,
+  loopBeats: number,
+  sampleRate: number,
+): Promise<Map<bigint, AudioBuffer>> {
+  const results = new Map<bigint, AudioBuffer>();
+
+  for (const track of tracks) {
+    const trackBlocks = blocks.filter(b => b.trackId === track.id);
+    if (!trackBlocks.length) continue;
+
+    const midiBlocks = trackBlocks.filter(b => b.kind !== 'audio');
+    if (!midiBlocks.length) continue;
+
+    console.log(`[superdough] rendering track "${track.name}" (${midiBlocks.length} blocks)...`);
+    const buffer = await renderTrackBuffer(midiBlocks, bpm, loopBeats, sampleRate);
+    results.set(track.id, buffer);
+    console.log(`[superdough] track "${track.name}" rendered: ${buffer.duration.toFixed(2)}s`);
+  }
+
+  return results;
 }

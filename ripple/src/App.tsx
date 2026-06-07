@@ -2,9 +2,9 @@ import React, { FormEvent, useCallback, useEffect, useMemo, useRef, useState } f
 import { useReducer, useSpacetimeDB, useTable } from 'spacetimedb/react';
 import { putCachedAudioAsset } from './audioAssetCache';
 import { analyzeAudioFile, chunkAudioBuffer, makeClientUploadKey } from './audioUpload';
-import { generateMetronomeBuffer, scheduleMetronome, PlaybackHandle } from './audioRenderer';
+import { generateMetronomeBuffer, scheduleMetronome, schedulePlayback, updatePlaybackGains, PlaybackHandle } from './audioRenderer';
 import { getMidiBlockPattern } from './strudelEngine';
-import { scheduleBlocksLive, stopAllLiveAudio } from './superdoughRenderer';
+import { renderAllTrackBuffers, ensureLiveContext } from './superdoughRenderer';
 import { reducers, tables } from './module_bindings';
 
 const BEAT_WIDTH = 80;
@@ -93,14 +93,21 @@ const SAMPLE_KITS: SampleKit[] = [
 
 type MelodyInstrument = { id: string; name: string; strudel: string; category: string };
 const MELODY_INSTRUMENTS: MelodyInstrument[] = [
-  { id: 'piano', name: 'Piano', strudel: 's("piano")', category: 'keys' },
-  { id: 'synth', name: 'Synth Lead', strudel: 's("sawtooth")', category: 'synth' },
-  { id: 'bass', name: 'Bass', strudel: 's("triangle")', category: 'bass' },
-  { id: 'strings', name: 'Strings', strudel: 's("sawtooth")', category: 'orchestral' },
-  { id: 'pad', name: 'Pad', strudel: 's("sawtooth")', category: 'synth' },
-  { id: 'organ', name: 'Organ', strudel: 's("triangle")', category: 'keys' },
-  { id: 'flute', name: 'Flute', strudel: 's("sine")', category: 'wind' },
-  { id: 'pluck', name: 'Pluck', strudel: 's("triangle")', category: 'guitar' },
+  { id: 'piano', name: 'Piano', strudel: 's("wt_piano")', category: 'keys' },
+  { id: 'epiano', name: 'E-Piano', strudel: 's("wt_epiano")', category: 'keys' },
+  { id: 'synth', name: 'FM Synth', strudel: 's("wt_fmsynth")', category: 'synth' },
+  { id: 'bass', name: 'E-Bass', strudel: 's("wt_ebass")', category: 'bass' },
+  { id: 'dbass', name: 'Double Bass', strudel: 's("wt_dbass")', category: 'bass' },
+  { id: 'strings', name: 'String Box', strudel: 's("wt_stringbox")', category: 'orchestral' },
+  { id: 'violin', name: 'Violin', strudel: 's("wt_violin")', category: 'orchestral' },
+  { id: 'cello', name: 'Cello', strudel: 's("wt_cello")', category: 'orchestral' },
+  { id: 'pad', name: 'Theremin', strudel: 's("wt_theremin")', category: 'synth' },
+  { id: 'organ', name: 'Organ', strudel: 's("wt_eorgan")', category: 'keys' },
+  { id: 'flute', name: 'Flute', strudel: 's("wt_flute")', category: 'wind' },
+  { id: 'pluck', name: 'Clavinet', strudel: 's("wt_clavinet")', category: 'keys' },
+  { id: 'vgame', name: '8-Bit', strudel: 's("wt_vgame")', category: 'synth' },
+  { id: 'aguitar', name: 'Acoustic Guitar', strudel: 's("wt_aguitar")', category: 'guitar' },
+  { id: 'eguitar', name: 'Electric Guitar', strudel: 's("wt_eguitar")', category: 'guitar' },
 ];
 
 function microsPerBeat(bpm: number): bigint {
@@ -292,6 +299,10 @@ function App() {
   const audioCtxRef = useRef<AudioContext | null>(null);
   const metronomeHandleRef = useRef<PlaybackHandle | null>(null);
   const metronomeBufferRef = useRef<AudioBuffer | null>(null);
+  const trackBuffersRef = useRef<Map<bigint, AudioBuffer>>(new Map());
+  const playbackHandleRef = useRef<PlaybackHandle | null>(null);
+  const renderingRef = useRef<boolean>(false);
+  const lastRenderKeyRef = useRef<string>('');
 
   useEffect(() => {
     if (!activeView) return;
@@ -368,11 +379,49 @@ function App() {
     void updateViewTransport({ viewId: activeView.id, playState: activeView.playState, playheadMicros: micros, bpm: activeView.bpm });
   }, [activeView, updateViewTransport]);
 
+  // Render track buffers when block/track data changes
+  useEffect(() => {
+    if (!activeView) return;
+    const roomTrackIds = new Set(roomTracks.map(t => t.id));
+    const roomBlocks = blocks.filter(b => roomTrackIds.has(b.trackId));
+    const midiBlocks = roomBlocks.filter(b => b.kind !== 'audio');
+
+    // Build a key from all MIDI data to detect changes
+    const renderKey = midiBlocks.map(b => `${b.id}:${b.midiJson}:${b.startBeat}:${b.lengthBeats}:${b.instrumentKind}:${b.instrumentKey}`).sort().join('|')
+      + `|bpm=${activeView.bpm}|beats=${maxBeatsRef.current}`;
+    if (renderKey === lastRenderKeyRef.current) return;
+    lastRenderKeyRef.current = renderKey;
+
+    if (renderingRef.current) return; // don't overlap renders
+    renderingRef.current = true;
+
+    const trackShapes = roomTracks.map(t => ({ id: t.id, name: t.name }));
+    const blockShapes = midiBlocks.map(b => ({
+      id: b.id, trackId: b.trackId, kind: b.kind, name: b.name,
+      startBeat: b.startBeat, lengthBeats: b.lengthBeats, midiJson: b.midiJson, assetId: b.assetId,
+      instrumentKind: b.instrumentKind, instrumentKey: b.instrumentKey,
+    }));
+    const maxBeats = maxBeatsRef.current;
+
+    void renderAllTrackBuffers(trackShapes, blockShapes, activeView.bpm, maxBeats, 44100).then(buffers => {
+      trackBuffersRef.current = buffers;
+      renderingRef.current = false;
+      console.log(`[audio] rendered ${buffers.size} track buffers`);
+    }).catch(err => {
+      console.error('[audio] render error:', err);
+      renderingRef.current = false;
+    });
+  }, [activeView?.bpm, blocks, roomTracks, activeView]);
+
+  // Playback: play/pause/stop using pre-rendered buffers
   useEffect(() => {
     if (!activeView) return;
 
-    const stopAll = () => {
-      stopAllLiveAudio();
+    const stopPlayback = () => {
+      if (playbackHandleRef.current) {
+        playbackHandleRef.current.stop();
+        playbackHandleRef.current = null;
+      }
       if (metronomeHandleRef.current) {
         metronomeHandleRef.current.stop();
         metronomeHandleRef.current = null;
@@ -380,51 +429,61 @@ function App() {
     };
 
     if (activeView.playState !== 'playing') {
-      stopAll();
+      stopPlayback();
       return;
     }
 
-    stopAll();
+    // Starting fresh playback
+    stopPlayback();
 
-    const roomTrackIds = new Set(roomTracks.map(t => t.id));
-    const blockShapes = blocks.filter(b => roomTrackIds.has(b.trackId)).map(b => ({
-      id: b.id, trackId: b.trackId, kind: b.kind, name: b.name,
-      startBeat: b.startBeat, lengthBeats: b.lengthBeats, midiJson: b.midiJson, assetId: b.assetId,
-      instrumentKind: b.instrumentKind, instrumentKey: b.instrumentKey,
-    }));
     const maxBeats = maxBeatsRef.current;
-    const playheadBeat = Number(localPlayheadRef.current) / 1_000_000 * (activeView.bpm / 60);
-    const trackMutedMap = new Map<bigint, boolean>();
+    const playheadSec = Number(localPlayheadRef.current) / 1_000_000;
+
+    // Build track states map for mute/volume
+    const trackStateMap = new Map<bigint, { muted: boolean; volume: number }>();
     for (const ts of activeTrackStates) {
-      trackMutedMap.set(ts.trackId, ts.muted);
+      trackStateMap.set(ts.trackId, { muted: ts.muted, volume: ts.volume });
     }
 
-    void scheduleBlocksLive(blockShapes, playheadBeat, activeView.bpm, maxBeats, trackMutedMap);
+    // Start playback with pre-rendered buffers
+    const startPlayback = async () => {
+      const audioCtx = await ensureLiveContext();
+      audioCtxRef.current = audioCtx;
+      if (audioCtx.state === 'suspended') await audioCtx.resume();
 
-    if (metronomeEnabled) {
-      if (!audioCtxRef.current) audioCtxRef.current = new AudioContext();
-      const audioCtx = audioCtxRef.current;
-      if (audioCtx.state === 'suspended') void audioCtx.resume();
-      if (!metronomeBufferRef.current) {
-        generateMetronomeBuffer(activeView.bpm, activeView.beatsPerBar, maxBeats, audioCtx.sampleRate).then(buf => {
+      const buffers = trackBuffersRef.current;
+      if (buffers.size > 0) {
+        const handle = schedulePlayback(audioCtx, buffers, playheadSec, activeView.bpm, maxBeats, trackStateMap);
+        playbackHandleRef.current = handle;
+      }
+
+      // Metronome
+      if (metronomeEnabled) {
+        if (!metronomeBufferRef.current) {
+          const buf = await generateMetronomeBuffer(activeView.bpm, activeView.beatsPerBar, maxBeats, audioCtx.sampleRate);
           metronomeBufferRef.current = buf;
-          if (playingRef.current && audioCtxRef.current) {
-            const currentPlayheadSec = Number(localPlayheadRef.current) / 1_000_000;
-            const metroHandle = scheduleMetronome(audioCtxRef.current!, buf, currentPlayheadSec, maxBeats, activeView!.bpm);
-            metronomeHandleRef.current = metroHandle;
-          }
-        });
-      } else {
-        const playheadSec = Number(localPlayheadRef.current) / 1_000_000;
+        }
         const metroHandle = scheduleMetronome(audioCtx, metronomeBufferRef.current, playheadSec, maxBeats, activeView.bpm);
         metronomeHandleRef.current = metroHandle;
       }
-    }
+    };
+
+    void startPlayback();
 
     return () => {
-      stopAll();
+      stopPlayback();
     };
-  }, [activeView?.playState, activeTrackStates, metronomeEnabled]);
+  }, [activeView?.playState, metronomeEnabled]);
+
+  // Update gains in real-time when mute/volume changes (no re-render needed)
+  useEffect(() => {
+    if (!playbackHandleRef.current) return;
+    const trackStateMap = new Map<bigint, { muted: boolean; volume: number }>();
+    for (const ts of activeTrackStates) {
+      trackStateMap.set(ts.trackId, { muted: ts.muted, volume: ts.volume });
+    }
+    updatePlaybackGains(playbackHandleRef.current, trackStateMap);
+  }, [activeTrackStates]);
 
   useEffect(() => {
     if (!blockDrag) return;
