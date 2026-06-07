@@ -230,10 +230,13 @@ function App() {
   const blockDragRef = useRef<typeof blockDrag>(null);
   const blockDragMovedRef = useRef(false);
   const blockDragEndedRef = useRef(false);
+  const [loopDragStartBeat, setLoopDragStartBeat] = useState<number | null>(null);
+  const [loopDragCurrentBeat, setLoopDragCurrentBeat] = useState<number | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; trackId: bigint } | null>(null);
   const [addBlockType, setAddBlockType] = useState<{ trackId: bigint; category: 'melody' | 'sample' } | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [audioRenderRetry, setAudioRenderRetry] = useState(0);
   const [joinDisplayName, setJoinDisplayName] = useState('');
   const tokenFromUrl = useRoomToken();
   const [page, setPage] = useState<'list' | 'workspace'>(tokenFromUrl ? 'workspace' : 'list');
@@ -256,6 +259,7 @@ function App() {
   const createSharedView = useReducer(reducers.createSharedView);
   const updateViewTransport = useReducer(reducers.updateViewTransport);
   const updateViewTrackState = useReducer(reducers.updateViewTrackState);
+  const updateViewLoopRegion = useReducer(reducers.updateViewLoopRegion);
   const createAsset = useReducer(reducers.createAsset);
   const addAssetChunk = useReducer(reducers.addAssetChunk);
   const createTrack = useReducer(reducers.createTrack);
@@ -286,6 +290,19 @@ function App() {
   const activeTrackStates = useMemo(() => trackStates.filter(state => state.viewId === activeView?.id), [activeView?.id, trackStates]);
   const masterView = roomViews.find(view => view.kind === 'master') ?? null;
   const masterTrackStates = useMemo(() => trackStates.filter(state => state.viewId === masterView?.id), [masterView?.id, trackStates]);
+  
+  const computedTrackStateMap = useMemo(() => {
+    const map = new Map<bigint, { muted: boolean; volume: number }>();
+    const anySolo = activeTrackStates.some(ts => ts.solo);
+    for (const track of roomTracks) {
+      const ts = activeTrackStates.find(s => s.trackId === track.id);
+      const muted = ts?.muted ?? false;
+      const solo = ts?.solo ?? false;
+      const effectivelyMuted = anySolo ? !solo : muted;
+      map.set(track.id, { muted: effectivelyMuted, volume: ts?.volume ?? 0.72 });
+    }
+    return map;
+  }, [activeTrackStates, roomTracks]);
 
   const animationRef = useRef<number>(0);
   const lastTimeRef = useRef<number>(0);
@@ -294,8 +311,10 @@ function App() {
   const viewIdRef = useRef<bigint | null>(null);
   const bpmRef = useRef<number>(120);
   const playingRef = useRef<boolean>(false);
+  const loopStartMicrosRef = useRef<bigint>(0n);
   const loopEndMicrosRef = useRef<bigint>(24n * 4n * 500_000n);
   const maxBeatsRef = useRef<number>(24 * 4);
+  const loopBeatsRef = useRef<number>(24 * 4);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const metronomeHandleRef = useRef<PlaybackHandle | null>(null);
   const metronomeBufferRef = useRef<AudioBuffer | null>(null);
@@ -303,6 +322,22 @@ function App() {
   const playbackHandleRef = useRef<PlaybackHandle | null>(null);
   const renderingRef = useRef<boolean>(false);
   const lastRenderKeyRef = useRef<string>('');
+  const timelineRulerRef = useRef<HTMLDivElement>(null);
+
+  if (activeView) {
+    const roomTrackIds = new Set(roomTracks.map(t => t.id));
+    const roomBlocks = blocks.filter(b => roomTrackIds.has(b.trackId));
+    const contentEndBeat = roomBlocks.length > 0 ? Math.max(...roomBlocks.map(b => b.startBeat + b.lengthBeats)) : activeView.beatsPerBar;
+
+    const customLoop = (activeView.loopLengthBeats ?? 0) > 0;
+    const loopBeats = customLoop ? activeView.loopStartBeat + activeView.loopLengthBeats : Math.max(activeView.beatsPerBar, Math.ceil(contentEndBeat / activeView.beatsPerBar) * activeView.beatsPerBar);
+    const visualBeats = Math.max(24, loopBeats + activeView.beatsPerBar);
+    
+    maxBeatsRef.current = visualBeats;
+    loopBeatsRef.current = loopBeats;
+    loopStartMicrosRef.current = customLoop ? BigInt(Math.round(activeView.loopStartBeat * (60_000_000 / activeView.bpm))) : 0n;
+    loopEndMicrosRef.current = BigInt(Math.round(loopBeats * (60_000_000 / activeView.bpm)));
+  }
 
   useEffect(() => {
     if (!activeView) return;
@@ -310,12 +345,6 @@ function App() {
     viewIdRef.current = activeView.id;
     bpmRef.current = activeView.bpm;
     playingRef.current = activeView.playState === 'playing';
-    const roomTrackIds = new Set(roomTracks.map(t => t.id));
-    const roomBlocks = blocks.filter(b => roomTrackIds.has(b.trackId));
-    const contentEndBeat = roomBlocks.length > 0 ? Math.max(...roomBlocks.map(b => b.startBeat + b.lengthBeats)) : activeView.beatsPerBar;
-    const loopBeats = Math.max(activeView.beatsPerBar, Math.ceil(contentEndBeat / activeView.beatsPerBar) * activeView.beatsPerBar);
-    maxBeatsRef.current = loopBeats;
-    loopEndMicrosRef.current = BigInt(Math.round(loopBeats * (60_000_000 / activeView.bpm)));
 
     if (activeView.playState !== 'playing') {
       cancelAnimationFrame(animationRef.current);
@@ -343,7 +372,10 @@ function App() {
       lastTimeRef.current = now;
 
       let nextPlayhead = localPlayheadRef.current + elapsedMicros;
-      if (nextPlayhead >= loopEndMicrosRef.current) nextPlayhead %= loopEndMicrosRef.current;
+      if (nextPlayhead >= loopEndMicrosRef.current) {
+        const loopLen = loopEndMicrosRef.current - loopStartMicrosRef.current;
+        nextPlayhead = loopStartMicrosRef.current + ((nextPlayhead - loopStartMicrosRef.current) % loopLen);
+      }
 
       localPlayheadRef.current = nextPlayhead;
       setDisplayPlayheadMicros(nextPlayhead);
@@ -387,35 +419,53 @@ function App() {
     const midiBlocks = roomBlocks.filter(b => b.kind !== 'audio');
 
     // Build a key from all MIDI data to detect changes
-    const renderKey = midiBlocks.map(b => `${b.id}:${b.midiJson}:${b.startBeat}:${b.lengthBeats}:${b.instrumentKind}:${b.instrumentKey}`).sort().join('|')
-      + `|bpm=${activeView.bpm}|beats=${maxBeatsRef.current}`;
+    const renderKey = midiBlocks.map(b => `${b.id}:${b.midiJson}:${b.startBeat}:${b.lengthBeats}:${b.loopBeats}:${b.instrumentKind}:${b.instrumentKey}`).sort().join('|')
+      + `|bpm=${activeView.bpm}|beats=${loopBeatsRef.current}|ls=${activeView.loopStartBeat}|ll=${activeView.loopLengthBeats}`;
     if (renderKey === lastRenderKeyRef.current) return;
-    lastRenderKeyRef.current = renderKey;
 
     if (renderingRef.current) return; // don't overlap renders
+    
+    lastRenderKeyRef.current = renderKey;
     renderingRef.current = true;
 
     const trackShapes = roomTracks.map(t => ({ id: t.id, name: t.name }));
     const blockShapes = midiBlocks.map(b => ({
       id: b.id, trackId: b.trackId, kind: b.kind, name: b.name,
-      startBeat: b.startBeat, lengthBeats: b.lengthBeats, midiJson: b.midiJson, assetId: b.assetId,
+      startBeat: b.startBeat, lengthBeats: b.lengthBeats, loopBeats: b.loopBeats, midiJson: b.midiJson, assetId: b.assetId,
       instrumentKind: b.instrumentKind, instrumentKey: b.instrumentKey,
     }));
-    const maxBeats = maxBeatsRef.current;
+    const loopBeats = loopBeatsRef.current;
 
-    void renderAllTrackBuffers(trackShapes, blockShapes, activeView.bpm, maxBeats, 44100).then(buffers => {
+    void renderAllTrackBuffers(trackShapes, blockShapes, activeView.bpm, loopBeats, 44100).then(buffers => {
       trackBuffersRef.current = buffers;
       renderingRef.current = false;
       console.log(`[audio] rendered ${buffers.size} track buffers`);
+      if (playingRef.current && audioCtxRef.current && playbackHandleRef.current) {
+        const playheadSec = playbackHandleRef.current.getCurrentTime();
+        
+        playbackHandleRef.current.stop();
+        if (metronomeHandleRef.current) metronomeHandleRef.current.stop();
+
+        const effLoopStart = (activeView.loopLengthBeats ?? 0) > 0 ? (activeView.loopStartBeat ?? 0) : 0;
+        playbackHandleRef.current = schedulePlayback(audioCtxRef.current, buffers, playheadSec, activeView.bpm, loopBeats, computedTrackStateMap, effLoopStart);
+        
+        if (metronomeEnabled && metronomeBufferRef.current) {
+          metronomeHandleRef.current = scheduleMetronome(audioCtxRef.current, metronomeBufferRef.current, playheadSec, loopBeats, activeView.bpm, effLoopStart);
+        }
+      }
+      setAudioRenderRetry(c => c + 1);
     }).catch(err => {
       console.error('[audio] render error:', err);
       renderingRef.current = false;
+      setAudioRenderRetry(c => c + 1);
     });
-  }, [activeView?.bpm, blocks, roomTracks, activeView]);
+  }, [activeView?.bpm, blocks, roomTracks, activeView, audioRenderRetry]);
 
   // Playback: play/pause/stop using pre-rendered buffers
   useEffect(() => {
     if (!activeView) return;
+
+    let cancelled = false;
 
     const stopPlayback = () => {
       if (playbackHandleRef.current) {
@@ -434,36 +484,41 @@ function App() {
     }
 
     // Starting fresh playback
+    let playheadSec = Number(localPlayheadRef.current) / 1_000_000;
+    if (playbackHandleRef.current) {
+      playheadSec = playbackHandleRef.current.getCurrentTime();
+    }
+
     stopPlayback();
 
-    const maxBeats = maxBeatsRef.current;
-    const playheadSec = Number(localPlayheadRef.current) / 1_000_000;
+    const loopBeats = loopBeatsRef.current;
 
     // Build track states map for mute/volume
-    const trackStateMap = new Map<bigint, { muted: boolean; volume: number }>();
-    for (const ts of activeTrackStates) {
-      trackStateMap.set(ts.trackId, { muted: ts.muted, volume: ts.volume });
-    }
+
 
     // Start playback with pre-rendered buffers
     const startPlayback = async () => {
       const audioCtx = await ensureLiveContext();
+      if (cancelled) return;
       audioCtxRef.current = audioCtx;
       if (audioCtx.state === 'suspended') await audioCtx.resume();
+      if (cancelled) return;
 
       const buffers = trackBuffersRef.current;
+      const effLoopStart = (activeView.loopLengthBeats ?? 0) > 0 ? (activeView.loopStartBeat ?? 0) : 0;
       if (buffers.size > 0) {
-        const handle = schedulePlayback(audioCtx, buffers, playheadSec, activeView.bpm, maxBeats, trackStateMap);
+        const handle = schedulePlayback(audioCtx, buffers, playheadSec, activeView.bpm, loopBeats, computedTrackStateMap, effLoopStart);
         playbackHandleRef.current = handle;
       }
 
       // Metronome
       if (metronomeEnabled) {
         if (!metronomeBufferRef.current) {
-          const buf = await generateMetronomeBuffer(activeView.bpm, activeView.beatsPerBar, maxBeats, audioCtx.sampleRate);
+          const buf = await generateMetronomeBuffer(activeView.bpm, activeView.beatsPerBar, loopBeats, audioCtx.sampleRate);
+          if (cancelled) return;
           metronomeBufferRef.current = buf;
         }
-        const metroHandle = scheduleMetronome(audioCtx, metronomeBufferRef.current, playheadSec, maxBeats, activeView.bpm);
+        const metroHandle = scheduleMetronome(audioCtx, metronomeBufferRef.current, playheadSec, loopBeats, activeView.bpm, effLoopStart);
         metronomeHandleRef.current = metroHandle;
       }
     };
@@ -471,6 +526,7 @@ function App() {
     void startPlayback();
 
     return () => {
+      cancelled = true;
       stopPlayback();
     };
   }, [activeView?.playState, metronomeEnabled]);
@@ -478,12 +534,8 @@ function App() {
   // Update gains in real-time when mute/volume changes (no re-render needed)
   useEffect(() => {
     if (!playbackHandleRef.current) return;
-    const trackStateMap = new Map<bigint, { muted: boolean; volume: number }>();
-    for (const ts of activeTrackStates) {
-      trackStateMap.set(ts.trackId, { muted: ts.muted, volume: ts.volume });
-    }
-    updatePlaybackGains(playbackHandleRef.current, trackStateMap);
-  }, [activeTrackStates]);
+    updatePlaybackGains(playbackHandleRef.current, computedTrackStateMap);
+  }, [computedTrackStateMap]);
 
   useEffect(() => {
     if (!blockDrag) return;
@@ -514,7 +566,7 @@ function App() {
       const dBeats = dx / BEAT_WIDTH;
       const block = blocks.find(b => b.id === drag.blockId);
       if (block) {
-        const base = { blockId: block.id, name: block.name, assetOffsetMicros: block.assetOffsetMicros, assetDurationMicros: block.assetDurationMicros, gain: block.gain, fadeInMicros: block.fadeInMicros, fadeOutMicros: block.fadeOutMicros, reverse: block.reverse, pitchSemitones: block.pitchSemitones, timeStretch: block.timeStretch, midiJson: block.midiJson, instrumentKind: block.instrumentKind ?? 'melodic', instrumentKey: block.instrumentKey ?? 'piano' };
+        const base = { blockId: block.id, name: block.name, assetOffsetMicros: block.assetOffsetMicros, assetDurationMicros: block.assetDurationMicros, gain: block.gain, fadeInMicros: block.fadeInMicros, fadeOutMicros: block.fadeOutMicros, reverse: block.reverse, pitchSemitones: block.pitchSemitones, timeStretch: block.timeStretch, midiJson: block.midiJson, instrumentKind: block.instrumentKind ?? 'melodic', instrumentKey: block.instrumentKey ?? 'piano', loopBeats: block.loopBeats };
         if (drag.mode === 'move') {
           const newStart = Math.max(0, Math.round((drag.startBeat + dBeats) * 4) / 4);
           void updateBlock({ ...base, startBeat: newStart, lengthBeats: block.lengthBeats });
@@ -802,7 +854,7 @@ function App() {
     );
   }
 
-  const time = formatTimecode(activeView?.playState === 'playing' ? displayPlayheadMicros : (activeView?.playheadMicros ?? 0n), activeView?.bpm ?? 120, activeView?.beatsPerBar ?? 4);
+  const time = formatTimecode(displayPlayheadMicros, activeView?.bpm ?? 120, activeView?.beatsPerBar ?? 4);
 
   if (needsJoinPrompt) {
     return (
@@ -889,11 +941,68 @@ function App() {
             const hidden = hiddenPlayheads.has(view.id);
             return <div className={`legend-item ${hidden ? 'legend-hidden' : ''}`} key={String(view.id)} onClick={() => { if (activeView && view.id === activeView.id) return; setHiddenPlayheads(prev => { const next = new Set(prev); if (next.has(view.id)) next.delete(view.id); else next.add(view.id); return next; }); }} style={{ cursor: 'pointer' }}><div className={`legend-swatch ph-${(index % 4) + 1}`} />{viewDisplayName(view, identity, roomMembers)}</div>;
           })}</div>
-          <div className="ruler" onClick={event => scrubToPixel(event.clientX, event.currentTarget)}>{Array.from({ length: maxBeatsRef.current }, (_, index) => <div className={`rm mono ${index % (activeView?.beatsPerBar ?? 4) === 0 ? 'rm-measure' : ''}`} key={index}>{index % (activeView?.beatsPerBar ?? 4) === 0 ? `${Math.floor(index / (activeView?.beatsPerBar ?? 4)) + 1}` : ''}</div>)}</div>
-          <div className="tl-body" onClick={event => { setContextMenu(null); if (!blockDragRef.current && !blockDrag && !blockDragEndedRef.current) scrubToPixel(event.clientX, event.currentTarget); }}>
+          <div className="tl-body"
+               onClick={event => { setContextMenu(null); if (!blockDragRef.current && !blockDrag && !blockDragEndedRef.current) scrubToPixel(event.clientX, event.currentTarget); }}>
+            <div className="ruler" ref={timelineRulerRef} 
+              onPointerDown={event => {
+                if (event.button === 2) {
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  const clickX = event.clientX - rect.left + event.currentTarget.scrollLeft;
+                  const beat = Math.round(clickX / BEAT_WIDTH);
+                  setLoopDragStartBeat(beat);
+                  setLoopDragCurrentBeat(beat);
+                  event.currentTarget.setPointerCapture(event.pointerId);
+                  event.preventDefault();
+                  event.stopPropagation();
+                } else if (event.button === 0) {
+                  scrubToPixel(event.clientX, event.currentTarget);
+                }
+              }}
+              onPointerMove={event => {
+                if (loopDragStartBeat !== null) {
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  const clickX = event.clientX - rect.left + event.currentTarget.scrollLeft;
+                  const beat = Math.round(clickX / BEAT_WIDTH);
+                  setLoopDragCurrentBeat(beat);
+                }
+              }}
+              onPointerUp={event => {
+                if (loopDragStartBeat !== null) {
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  const clickX = event.clientX - rect.left + event.currentTarget.scrollLeft;
+                  const beat = Math.round(clickX / BEAT_WIDTH);
+                  const start = Math.min(loopDragStartBeat, beat);
+                  const end = Math.max(loopDragStartBeat, beat);
+                  const length = end - start;
+                  if (activeView) {
+                    updateViewLoopRegion({ viewId: activeView.id, loopStartBeat: start, loopLengthBeats: length });
+                  }
+                  setLoopDragStartBeat(null);
+                  setLoopDragCurrentBeat(null);
+                  event.currentTarget.releasePointerCapture(event.pointerId);
+                }
+              }}
+              onContextMenu={event => event.preventDefault()}
+            >
+              {Array.from({ length: maxBeatsRef.current }, (_, index) => <div className={`rm mono ${index % (activeView?.beatsPerBar ?? 4) === 0 ? 'rm-measure' : ''}`} key={index}>{index % (activeView?.beatsPerBar ?? 4) === 0 ? `${Math.floor(index / (activeView?.beatsPerBar ?? 4)) + 1}` : ''}</div>)}
+              {(() => {
+                let renderStartBeat = activeView?.loopStartBeat ?? 0;
+                let renderLengthBeats = activeView?.loopLengthBeats ?? 0;
+                if (loopDragStartBeat !== null && loopDragCurrentBeat !== null) {
+                  renderStartBeat = Math.min(loopDragStartBeat, loopDragCurrentBeat);
+                  renderLengthBeats = Math.max(loopDragStartBeat, loopDragCurrentBeat) - renderStartBeat;
+                }
+                if (renderLengthBeats > 0) {
+                  return (
+                    <div style={{ position: 'absolute', left: renderStartBeat * BEAT_WIDTH, width: renderLengthBeats * BEAT_WIDTH, top: 0, bottom: 0, backgroundColor: 'oklch(68% 0.16 195 / 0.1)', borderLeft: '2px solid oklch(68% 0.16 195)', borderRight: '2px solid oklch(68% 0.16 195)', pointerEvents: 'none' }} />
+                  );
+                }
+                return null;
+              })()}
+            </div>
             {roomViews.filter(view => !hiddenPlayheads.has(view.id) || (activeView && view.id === activeView.id)).map((view) => {
               const isActive = activeView && view.id === activeView.id;
-              const playheadMicros = isActive && activeView?.playState === 'playing' ? displayPlayheadMicros : view.playheadMicros;
+              const playheadMicros = isActive ? displayPlayheadMicros : view.playheadMicros;
               const colorIndex = roomViews.indexOf(view) % 4;
               const label = view.kind === 'master' ? 'Master' : initials(viewDisplayName(view, identity, roomMembers));
               const left = microsToPixels(playheadMicros, view.bpm);
@@ -919,7 +1028,7 @@ function App() {
               const muted = stateForTrack(track.id)?.muted ?? false;
               const blocksForLane = blocksForTrack(track.id);
               return (
-                <div key={String(track.id)} className={`${blocksForLane.some(block => block.kind === 'audio') ? 'lane-audio' : 'lane-midi'} ${muted ? 'lane-muted' : ''}`} onContextMenu={event => { event.preventDefault(); event.stopPropagation(); setContextMenu({ x: event.clientX, y: event.clientY, trackId: track.id }); }}>
+                <div key={String(track.id)} className={`${blocksForLane.some(block => block.kind === 'audio') ? 'lane-audio' : 'lane-midi'} ${muted ? 'lane-muted' : ''}`} style={{ width: maxBeatsRef.current * 80 }} onContextMenu={event => { event.preventDefault(); event.stopPropagation(); setContextMenu({ x: event.clientX, y: event.clientY, trackId: track.id }); }}>
                   {blocksForLane.map((block, index) => {
                     const isSelected = selectedBlockId === block.id;
                     const left = block.startBeat * BEAT_WIDTH;
@@ -938,7 +1047,28 @@ function App() {
                     };
                     return isMidiBlock(block) ? (
                       <button key={String(block.id)} data-block-id={String(block.id)} className={`clip-m s${(index % 3) + 1} ${isSelected ? 'selected' : ''}`} style={{ left, width }} onPointerDown={onBlockPointerDown} onDoubleClick={event => { event.stopPropagation(); setOpenPianoRollBlockId(block.id); }}>
-                        <div className="midi-lbl">{block.name}</div><div className="midi-notes">{(() => { const notes = midiPreview(block.midiJson); if (!notes.length) return null; const maxBeat = Math.max(block.lengthBeats, ...notes.map(n => (n.startBeat ?? 0) + (n.lengthBeats ?? 0))); return notes.map((note, i) => <span key={i} className={`midi-note ${isSampleBlock(block) ? 'drum' : ''}`} style={{ left: `${((note.startBeat ?? 0) / maxBeat) * 100}%`, bottom: `${(((note.pitch ?? 60) - 36) / 48) * 100}%`, width: `${Math.max(2, ((note.lengthBeats ?? 0.25) / maxBeat) * 100)}%` }} />); })()}</div>
+                        <div className="midi-lbl">{block.name}</div><div className="midi-notes">{(() => {
+                          const notes = midiPreview(block.midiJson);
+                          if (!notes.length) return null;
+                          const loopBeats = block.loopBeats > 0 ? block.loopBeats : block.lengthBeats;
+                          const maxBeat = block.lengthBeats;
+                          const renderedNotes = [];
+                          for (const note of notes) {
+                            let offset = 0;
+                            while ((note.startBeat ?? 0) + offset < block.lengthBeats) {
+                              const noteStart = (note.startBeat ?? 0) + offset;
+                              const noteEnd = Math.min(noteStart + (note.lengthBeats ?? 0.25), block.lengthBeats);
+                              const len = noteEnd - noteStart;
+                              if (len > 0) {
+                                renderedNotes.push(
+                                  <span key={`${note.id || Math.random()}-${offset}`} className={`midi-note ${isSampleBlock(block) ? 'drum' : ''}`} style={{ left: `${(noteStart / maxBeat) * 100}%`, bottom: `${(((note.pitch ?? 60) - 36) / 48) * 100}%`, width: `${Math.max(2, (len / maxBeat) * 100)}%`, opacity: offset > 0 ? 0.3 : 1 }} />
+                                );
+                              }
+                              offset += loopBeats;
+                            }
+                          }
+                          return renderedNotes;
+                        })()}</div>
                         <div className="clip-resize-handle" onPointerDown={onResizePointerDown} />
                       </button>
                     ) : (
@@ -1002,12 +1132,12 @@ function App() {
           <div className="modal-sub">{addBlockType.category === 'melody' ? 'Choose an instrument for this melody block.' : 'Choose a sample kit for this block.'}</div>
           <div className="instrument-grid">
             {addBlockType.category === 'melody' ? MELODY_INSTRUMENTS.map(inst => (
-              <button key={inst.id} className="instrument-card" onClick={() => { void createBlock({ trackId: addBlockType.trackId, kind: 'midi', name: inst.name, instrumentKind: 'melodic', instrumentKey: inst.id, assetId: 0n, startBeat: 1, lengthBeats: 4, midiJson: '' }); setAddBlockType(null); }}>
+              <button key={inst.id} className="instrument-card" onClick={() => { void createBlock({ trackId: addBlockType.trackId, kind: 'midi', name: inst.name, instrumentKind: 'melodic', instrumentKey: inst.id, assetId: 0n, startBeat: 1, lengthBeats: 4, loopBeats: 4, midiJson: '' }); setAddBlockType(null); }}>
                 <div className="instrument-name mono">{inst.name}</div>
                 <div className="instrument-cat">{inst.category}</div>
               </button>
             )) : SAMPLE_KITS.map(kit => (
-              <button key={kit.id} className="instrument-card" onClick={() => { const midiJson = JSON.stringify({ notes: kit.sounds.slice(0, 3).map((s, i) => ({ id: `d${i}`, pitch: s.pitch, startBeat: i, lengthBeats: 0.5, velocity: 0.8 })) }); void createBlock({ trackId: addBlockType.trackId, kind: 'midi', name: kit.name, instrumentKind: 'sample', instrumentKey: kit.id, assetId: 0n, startBeat: 1, lengthBeats: 4, midiJson }); setAddBlockType(null); }}>
+              <button key={kit.id} className="instrument-card" onClick={() => { const midiJson = JSON.stringify({ notes: kit.sounds.slice(0, 3).map((s, i) => ({ id: `d${i}`, pitch: s.pitch, startBeat: i, lengthBeats: 0.5, velocity: 0.8 })) }); void createBlock({ trackId: addBlockType.trackId, kind: 'midi', name: kit.name, instrumentKind: 'sample', instrumentKey: kit.id, assetId: 0n, startBeat: 1, lengthBeats: 4, loopBeats: 4, midiJson }); setAddBlockType(null); }}>
                 <div className="instrument-name mono">{kit.name}</div>
                 <div className="instrument-cat">{kit.category} · {kit.sounds.length} sounds</div>
               </button>
@@ -1033,7 +1163,7 @@ function TopBar({ roomName, connected, members, shareUrl, onHome }: { roomName: 
   );
 }
 
-function PianoRollModal({ blockId, block, updateBlockMidi, updateBlock, beatsPerBar, onClose }: { blockId: bigint; block: { name: string; midiJson: string; instrumentKind?: string; instrumentKey?: string; startBeat: number; lengthBeats: number; assetOffsetMicros: bigint; assetDurationMicros: bigint; gain: number; fadeInMicros: bigint; fadeOutMicros: bigint; reverse: boolean; pitchSemitones: number; timeStretch: number }; updateBlockMidi: (params: { blockId: bigint; midiJson: string }) => Promise<void>; updateBlock: (params: { blockId: bigint; name: string; startBeat: number; lengthBeats: number; assetOffsetMicros: bigint; assetDurationMicros: bigint; gain: number; fadeInMicros: bigint; fadeOutMicros: bigint; reverse: boolean; pitchSemitones: number; timeStretch: number; midiJson: string; instrumentKind: string; instrumentKey: string }) => Promise<void>; beatsPerBar: number; onClose: () => void }) {
+function PianoRollModal({ blockId, block, updateBlockMidi, updateBlock, beatsPerBar, onClose }: { blockId: bigint; block: { name: string; midiJson: string; instrumentKind?: string; instrumentKey?: string; startBeat: number; lengthBeats: number; loopBeats: number; assetOffsetMicros: bigint; assetDurationMicros: bigint; gain: number; fadeInMicros: bigint; fadeOutMicros: bigint; reverse: boolean; pitchSemitones: number; timeStretch: number }; updateBlockMidi: (params: { blockId: bigint; midiJson: string }) => Promise<void>; updateBlock: (params: { blockId: bigint; name: string; startBeat: number; lengthBeats: number; loopBeats: number; assetOffsetMicros: bigint; assetDurationMicros: bigint; gain: number; fadeInMicros: bigint; fadeOutMicros: bigint; reverse: boolean; pitchSemitones: number; timeStretch: number; midiJson: string; instrumentKind: string; instrumentKey: string }) => Promise<void>; beatsPerBar: number; onClose: () => void }) {
   const isSample = block.instrumentKind === 'sample';
   const sampleKit = isSample ? SAMPLE_KITS.find(k => k.id === block.instrumentKey) : null;
   const scales = {
@@ -1058,6 +1188,8 @@ function PianoRollModal({ blockId, block, updateBlockMidi, updateBlock, beatsPer
     }
     return out;
   }, [scaleKey, isSample, sampleKit]);
+  const loopBeats = block.loopBeats > 0 ? block.loopBeats : block.lengthBeats;
+  const [horizontalBeats, setHorizontalBeats] = useState(() => Math.max(8, Math.ceil(loopBeats / 4) * 4 + 4));
   const [notes, setNotes] = useState(() => parseMidiNotes(block.midiJson));
   const [selectedNoteIds, setSelectedNoteIds] = useState<string[]>(notes[0]?.id ? [notes[0].id] : []);
   const [dragMode, setDragMode] = useState<'move' | 'resize' | null>(null);
@@ -1118,7 +1250,6 @@ function PianoRollModal({ blockId, block, updateBlockMidi, updateBlock, beatsPer
 
   const laneHeight = 24;
   const totalRows = pitchRows.length;
-  const horizontalBeats = Math.max(256, Math.ceil((Number(blockId % 64n) + 1) * 16));
   const pianoTopOffset = 18;
   const beatMarkers = Array.from({ length: Math.ceil(horizontalBeats / beatsPerBar) + 1 }, (_, index) => index * beatsPerBar);
   const snapBeat = (value: number) => Math.max(0, Math.round(value * 4) / 4);
@@ -1379,15 +1510,32 @@ function PianoRollModal({ blockId, block, updateBlockMidi, updateBlock, beatsPer
               {Object.entries(scales).map(([key, value]) => <option key={key} value={key}>{value.label}</option>)}
             </select>
           </label>
+          <label className="modal-chip mono">Measures
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginLeft: 6 }}>
+              <button className="icon-btn small" onClick={() => {
+                const newLoopBeats = Math.max(4, loopBeats - 4);
+                if (newLoopBeats !== loopBeats) {
+                  setHorizontalBeats(Math.max(8, Math.ceil(newLoopBeats / 4) * 4 + 4));
+                  void updateBlock({ ...block, blockId, instrumentKind: block.instrumentKind ?? 'melodic', instrumentKey: block.instrumentKey ?? 'piano', loopBeats: newLoopBeats });
+                }
+              }}>-</button>
+              <span>{Math.round(loopBeats / 4)}</span>
+              <button className="icon-btn small" onClick={() => {
+                const newLoopBeats = loopBeats + 4;
+                setHorizontalBeats(Math.max(8, Math.ceil(newLoopBeats / 4) * 4 + 4));
+                void updateBlock({ ...block, blockId, instrumentKind: block.instrumentKind ?? 'melodic', instrumentKey: block.instrumentKey ?? 'piano', loopBeats: newLoopBeats });
+              }}>+</button>
+            </div>
+          </label>
           <label className="modal-chip mono">{isSample ? 'Kit' : 'Instrument'}
             <select value={block.instrumentKey ?? ''} onChange={event => {
               const key = event.target.value;
               if (isSample) {
                 const kit = SAMPLE_KITS.find(k => k.id === key);
-                if (kit) void updateBlock({ blockId, name: kit.name, instrumentKind: 'sample', instrumentKey: key, startBeat: block.startBeat, lengthBeats: block.lengthBeats, assetOffsetMicros: block.assetOffsetMicros, assetDurationMicros: block.assetDurationMicros, gain: block.gain, fadeInMicros: block.fadeInMicros, fadeOutMicros: block.fadeOutMicros, reverse: block.reverse, pitchSemitones: block.pitchSemitones, timeStretch: block.timeStretch, midiJson: block.midiJson });
+                if (kit) void updateBlock({ blockId, name: kit.name, instrumentKind: 'sample', instrumentKey: key, startBeat: block.startBeat, lengthBeats: block.lengthBeats, loopBeats: block.loopBeats, assetOffsetMicros: block.assetOffsetMicros, assetDurationMicros: block.assetDurationMicros, gain: block.gain, fadeInMicros: block.fadeInMicros, fadeOutMicros: block.fadeOutMicros, reverse: block.reverse, pitchSemitones: block.pitchSemitones, timeStretch: block.timeStretch, midiJson: block.midiJson });
               } else {
                 const inst = MELODY_INSTRUMENTS.find(i => i.id === key);
-                if (inst) void updateBlock({ blockId, name: inst.name, instrumentKind: 'melodic', instrumentKey: key, startBeat: block.startBeat, lengthBeats: block.lengthBeats, assetOffsetMicros: block.assetOffsetMicros, assetDurationMicros: block.assetDurationMicros, gain: block.gain, fadeInMicros: block.fadeInMicros, fadeOutMicros: block.fadeOutMicros, reverse: block.reverse, pitchSemitones: block.pitchSemitones, timeStretch: block.timeStretch, midiJson: block.midiJson });
+                if (inst) void updateBlock({ blockId, name: inst.name, instrumentKind: 'melodic', instrumentKey: key, startBeat: block.startBeat, lengthBeats: block.lengthBeats, loopBeats: block.loopBeats, assetOffsetMicros: block.assetOffsetMicros, assetDurationMicros: block.assetDurationMicros, gain: block.gain, fadeInMicros: block.fadeInMicros, fadeOutMicros: block.fadeOutMicros, reverse: block.reverse, pitchSemitones: block.pitchSemitones, timeStretch: block.timeStretch, midiJson: block.midiJson });
               }
             }}>
               {isSample ? SAMPLE_KITS.map(kit => <option key={kit.id} value={kit.id}>{kit.name}</option>) : MELODY_INSTRUMENTS.map(inst => <option key={inst.id} value={inst.id}>{inst.name}</option>)}
@@ -1454,6 +1602,24 @@ function PianoRollModal({ blockId, block, updateBlockMidi, updateBlock, beatsPer
                     );
                   })}
                   {selectionBox?.active ? <div className="selection-rect" style={{ left: Math.min(selectionBox.startX, selectionBox.x), top: Math.min(selectionBox.startY, selectionBox.y), width: Math.abs(selectionBox.x - selectionBox.startX), height: Math.abs(selectionBox.y - selectionBox.startY) }} /> : null}
+                  {loopBeats < horizontalBeats ? <div className="piano-grid-out-of-bounds" style={{ position: 'absolute', top: pianoTopOffset, left: loopBeats * 48, width: (horizontalBeats - loopBeats) * 48, height: totalRows * laneHeight, backgroundColor: 'rgba(0, 0, 0, 0.4)', pointerEvents: 'none', zIndex: 1 }} /> : null}
+                  {notes.flatMap(note => {
+                    const phantoms = [];
+                    let offset = loopBeats;
+                    while (note.startBeat + offset < horizontalBeats) {
+                      const rowIndex = pitchToRow(note.pitch);
+                      const left = (note.startBeat + offset) * 48;
+                      const width = note.lengthBeats * 48;
+                      const top = rowIndex * laneHeight + pianoTopOffset + 3;
+                      phantoms.push(
+                        <div key={`${note.id}-phantom-${offset}`} className="roll-note phantom" style={{ left, top, width, height: 18, opacity: 0.3, pointerEvents: 'none', filter: 'grayscale(100%)' }}>
+                           <span className="roll-note-label">{pitchName(note.pitch)}</span>
+                        </div>
+                      );
+                      offset += loopBeats;
+                    }
+                    return phantoms;
+                  })}
                   {noteDraft ? <div className="roll-note draft" style={{ left: noteDraft.startBeat * 48, top: pitchToRow(noteDraft.pitch) * laneHeight + pianoTopOffset + 3, width: Math.max(0.25, noteDraft.endBeat - noteDraft.startBeat) * 48, height: 18 }} /> : null}
                   {notes.map(note => {
                   const rowIndex = pitchToRow(note.pitch);

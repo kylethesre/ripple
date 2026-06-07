@@ -5,6 +5,7 @@ import {
   initAudio,
   registerSynthSounds,
   samples,
+  tables,
   resetGlobalEffects,
   setSuperdoughAudioController,
 } from 'superdough';
@@ -24,6 +25,7 @@ type BlockShape = {
   name: string;
   startBeat: number;
   lengthBeats: number;
+  loopBeats: number;
   midiJson: string;
   assetId: bigint;
   instrumentKind?: string;
@@ -57,9 +59,20 @@ function parseMidiNotes(midiJson: string): MidiNote[] {
 }
 
 const DRUM_MAP: Record<number, string> = {
-  36: 'kick', 35: 'kick', 38: 'snare', 42: 'shaker', 46: 'shaker', 39: 'clap', 37: 'stab',
+  36: 'kick', 35: 'kick', 38: 'snare', 42: 'hat', 46: 'hat', 39: 'clap', 37: 'perc',
   50: 'tom', 47: 'tom', 45: 'tom', 41: 'tom', 48: 'tom', 43: 'tom',
   49: 'crash', 56: 'crash',
+};
+
+const KIT_OFFSETS: Record<string, number> = {
+  tr909: 0,
+  tr808: 1,
+  linn: 2,
+  tr707: 3,
+  rhythmace: 4,
+  visco: 5,
+  cassio: 6,
+  jazz: 7,
 };
 
 const MELODY_SOUNDS: Record<string, string> = {
@@ -109,7 +122,7 @@ async function ensureSuperdoughInit() {
         flattened[key] = value;
       }
     }
-    await samples(flattened, baseUrl);
+    await tables(baseUrl, 2048, flattened);
     console.log('[superdough] waveforms loaded');
   } catch (e) {
     console.warn('[superdough] waveform load error:', e);
@@ -181,26 +194,60 @@ export async function renderTrackBuffer(
     const isSample = block.instrumentKind === 'sample';
     const instrumentKey = block.instrumentKey ?? '';
     const melodySound = MELODY_SOUNDS[instrumentKey] ?? 'triangle';
+    const loopBeats = block.loopBeats > 0 ? block.loopBeats : block.lengthBeats;
 
     for (const note of notes) {
-      const noteAbsoluteBeat = block.startBeat + note.startBeat;
-      const noteSec = noteAbsoluteBeat / beatsPerSec;
-      const noteDurSec = Math.max(0.02, note.lengthBeats / beatsPerSec);
-      const gain = Math.max(0.05, Math.min(1, note.velocity ?? 0.8));
+      let currentOffset = 0;
+      
+      while (note.startBeat + currentOffset < block.lengthBeats) {
+        const noteStartBeat = note.startBeat + currentOffset;
+        const noteEndBeat = Math.min(noteStartBeat + note.lengthBeats, block.lengthBeats);
+        const actualLengthBeats = noteEndBeat - noteStartBeat;
+        
+        if (actualLengthBeats <= 0) {
+          currentOffset += loopBeats;
+          continue;
+        }
 
-      if (noteSec >= totalSeconds) continue;
+        const noteAbsoluteBeat = block.startBeat + noteStartBeat;
+        const noteSec = noteAbsoluteBeat / beatsPerSec;
+        const noteDurSec = Math.max(0.02, actualLengthBeats / beatsPerSec);
+        const gain = Math.max(0.05, Math.min(1, note.velocity ?? 0.8));
 
-      if (isSample) {
-        const sample = DRUM_MAP[Math.round(note.pitch)] ?? 'hh';
-        schedulePromises.push(
-          superdough({ s: sample, gain, duration: noteDurSec }, noteSec, noteDurSec)
-            .catch((e: unknown) => console.warn('[superdough] offline drum error:', e))
-        );
-      } else {
-        schedulePromises.push(
-          superdough({ s: melodySound, note: note.pitch, gain, duration: noteDurSec }, noteSec, noteDurSec)
-            .catch((e: unknown) => console.warn('[superdough] offline melody error:', e))
-        );
+        if (noteSec >= totalSeconds) {
+          currentOffset += loopBeats;
+          continue;
+        }
+
+        if (isSample) {
+          const sample = DRUM_MAP[Math.round(note.pitch)] ?? 'hat';
+          const offset = KIT_OFFSETS[instrumentKey] ?? 0;
+          schedulePromises.push(
+            superdough({ s: sample, n: offset, gain, duration: noteDurSec }, noteSec, noteDurSec)
+              .catch((e: unknown) => console.warn('[superdough] offline drum error:', e))
+          );
+        } else {
+          const isPad = melodySound.includes('string') || melodySound.includes('theremin') || melodySound.includes('pad') || melodySound.includes('flute') || melodySound.includes('organ') || melodySound.includes('cello') || melodySound.includes('violin');
+          schedulePromises.push(
+            superdough({ 
+              s: melodySound, 
+              note: note.pitch, 
+              gain, 
+              duration: noteDurSec,
+              attack: isPad ? 0.2 : 0.01,
+              decay: 0.3,
+              sustain: isPad ? 0.8 : 0.2,
+              release: isPad ? 0.8 : 0.5,
+              unison: 3,
+              detune: 0.03,
+              room: 0.3,
+              wt: 0.3, 
+            }, noteSec, noteDurSec)
+              .catch((e: unknown) => console.warn('[superdough] offline melody error:', e))
+          );
+        }
+        
+        currentOffset += loopBeats;
       }
     }
   }

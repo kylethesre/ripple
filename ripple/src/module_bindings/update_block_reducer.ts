@@ -15,6 +15,7 @@ export default {
   name: __t.string(),
   startBeat: __t.f64(),
   lengthBeats: __t.f64(),
+  loopBeats: __t.f64(),
   assetOffsetMicros: __t.u64(),
   assetDurationMicros: __t.u64(),
   gain: __t.f64(),

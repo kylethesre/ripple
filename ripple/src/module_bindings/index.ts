@@ -49,6 +49,7 @@ import SetDisplayNameReducer from "./set_display_name_reducer";
 import UpdateBlockReducer from "./update_block_reducer";
 import UpdateBlockMidiReducer from "./update_block_midi_reducer";
 import UpdateViewLayoutReducer from "./update_view_layout_reducer";
+import UpdateViewLoopRegionReducer from "./update_view_loop_region_reducer";
 import UpdateViewTrackStateReducer from "./update_view_track_state_reducer";
 import UpdateViewTransportReducer from "./update_view_transport_reducer";
 import UpsertAutomationPointReducer from "./upsert_automation_point_reducer";
@@ -277,6 +278,7 @@ const reducersSchema = __reducers(
   __reducerSchema("update_block", UpdateBlockReducer),
   __reducerSchema("update_block_midi", UpdateBlockMidiReducer),
   __reducerSchema("update_view_layout", UpdateViewLayoutReducer),
+  __reducerSchema("update_view_loop_region", UpdateViewLoopRegionReducer),
   __reducerSchema("update_view_track_state", UpdateViewTrackStateReducer),
   __reducerSchema("update_view_transport", UpdateViewTransportReducer),
   __reducerSchema("upsert_automation_point", UpsertAutomationPointReducer),

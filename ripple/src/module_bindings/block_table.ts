@@ -20,6 +20,7 @@ export default __t.row({
   assetId: __t.u64().name("asset_id"),
   startBeat: __t.f64().name("start_beat"),
   lengthBeats: __t.f64().name("length_beats"),
+  loopBeats: __t.f64().name("loop_beats"),
   assetOffsetMicros: __t.u64().name("asset_offset_micros"),
   assetDurationMicros: __t.u64().name("asset_duration_micros"),
   gain: __t.f64(),

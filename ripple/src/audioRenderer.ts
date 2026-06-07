@@ -47,13 +47,15 @@ export function schedulePlayback(
   trackBuffers: Map<bigint, AudioBuffer>,
   playheadSec: number,
   bpm: number,
-  loopBeats: number,
-  trackStates: Map<bigint, { muted: boolean; volume: number }>
+  loopBeats: number, // this is effectively the end of the loop
+  trackStates: Map<bigint, { muted: boolean; volume: number }>,
+  loopStartBeat: number = 0
 ): PlaybackHandle {
   const sources: AudioBufferSourceNode[] = [];
   const gains: GainNode[] = [];
   const trackGains = new Map<bigint, GainNode>();
   const totalSec = loopBeats / (bpm / 60);
+  const loopStartSec = loopStartBeat / (bpm / 60);
 
   for (const [trackId, buffer] of trackBuffers) {
     const state = trackStates.get(trackId);
@@ -61,7 +63,7 @@ export function schedulePlayback(
     const source = audioCtx.createBufferSource();
     source.buffer = buffer;
     source.loop = true;
-    source.loopStart = 0;
+    source.loopStart = loopStartSec;
     source.loopEnd = totalSec;
 
     const gain = audioCtx.createGain();
@@ -105,7 +107,12 @@ export function schedulePlayback(
     },
     getCurrentTime() {
       const elapsed = audioCtx.currentTime - startedAt;
-      return (startOffset + elapsed) % totalSec;
+      const pos = startOffset + elapsed;
+      if (pos >= totalSec) {
+        const loopLen = totalSec - loopStartSec;
+        return loopStartSec + ((pos - totalSec) % loopLen);
+      }
+      return pos;
     },
   };
 }
@@ -161,13 +168,14 @@ export function scheduleMetronome(
   audioCtx: AudioContext,
   buffer: AudioBuffer,
   playheadSec: number,
-  loopBeats: number,
-  bpm: number
+  loopBeats: number, // this is the end of the loop
+  bpm: number,
+  loopStartBeat: number = 0
 ): PlaybackHandle {
   const source = audioCtx.createBufferSource();
   source.buffer = buffer;
   source.loop = true;
-  source.loopStart = 0;
+  source.loopStart = loopStartBeat / (bpm / 60);
   const totalSec = loopBeats / (bpm / 60);
   source.loopEnd = totalSec;
   const gain = audioCtx.createGain();
@@ -198,7 +206,13 @@ export function scheduleMetronome(
     },
     getCurrentTime() {
       const elapsed = audioCtx.currentTime - startedAt;
-      return (offset + elapsed) % totalSec;
+      const pos = offset + elapsed;
+      if (pos >= totalSec) {
+        const loopStartSec = loopStartBeat / (bpm / 60);
+        const loopLen = totalSec - loopStartSec;
+        return loopStartSec + ((pos - totalSec) % loopLen);
+      }
+      return pos;
     },
   };
 }

@@ -9,6 +9,7 @@ declare module 'superdough' {
   export function resetDefaults(): void;
   export function registerSynthSounds(): void;
   export function samples(sampleMap: string | Record<string, unknown>, baseUrl?: string, options?: Record<string, unknown>): Promise<void>;
+  export function tables(baseUrl: string, frameLen: number, sampleMap: Record<string, unknown>): Promise<void>;
   export function tables(sampleMap: string | Record<string, unknown>, baseUrl?: string, options?: Record<string, unknown>): Promise<void>;
   export function resetGlobalEffects(): void;
   export function setSuperdoughAudioController(controller: unknown): void;

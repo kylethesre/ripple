@@ -73,6 +73,7 @@ export const Block = __t.object("Block", {
   assetId: __t.u64(),
   startBeat: __t.f64(),
   lengthBeats: __t.f64(),
+  loopBeats: __t.f64(),
   assetOffsetMicros: __t.u64(),
   assetDurationMicros: __t.u64(),
   gain: __t.f64(),
@@ -149,6 +150,8 @@ export const View = __t.object("View", {
   scrollLeft: __t.u32(),
   createdAt: __t.timestamp(),
   updatedAt: __t.timestamp(),
+  loopStartBeat: __t.f64(),
+  loopLengthBeats: __t.f64(),
 });
 export type View = __Infer<typeof View>;
 

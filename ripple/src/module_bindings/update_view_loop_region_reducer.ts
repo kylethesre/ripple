@@ -11,14 +11,7 @@ import {
 } from "spacetimedb";
 
 export default {
-  trackId: __t.u64(),
-  kind: __t.string(),
-  name: __t.string(),
-  instrumentKind: __t.string(),
-  instrumentKey: __t.string(),
-  assetId: __t.u64(),
-  startBeat: __t.f64(),
-  lengthBeats: __t.f64(),
-  loopBeats: __t.f64(),
-  midiJson: __t.string(),
+  viewId: __t.u64(),
+  loopStartBeat: __t.f64(),
+  loopLengthBeats: __t.f64(),
 };

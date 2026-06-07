@@ -26,4 +26,6 @@ export default __t.row({
   scrollLeft: __t.u32().name("scroll_left"),
   createdAt: __t.timestamp().name("created_at"),
   updatedAt: __t.timestamp().name("updated_at"),
+  loopStartBeat: __t.f64().name("loop_start_beat"),
+  loopLengthBeats: __t.f64().name("loop_length_beats"),
 });

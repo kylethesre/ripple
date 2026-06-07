@@ -141,7 +141,7 @@ input[type="text"], input[type="range"], textarea, .modal-input, .piano-notes { 
 .legend-swatch.ph-2 { background: var(--col-b); }
 .legend-swatch.ph-3 { background: var(--col-c); }
 .legend-sep { width: 1px; background: var(--border); margin: 0 4px; }
-.ruler { height: 22px; background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0; display: flex; align-items: flex-end; overflow: hidden; cursor: col-resize; }
+.ruler { height: 22px; background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0; display: flex; align-items: flex-end; position: sticky; top: 0; z-index: 10; width: max-content; min-width: 100%; cursor: pointer; }
 .rm { font-size: 8px; color: var(--fg-muted); border-left: 1px solid var(--border-dim); padding-left: 3px; padding-bottom: 2px; flex-shrink: 0; width: 80px; pointer-events: none; }
 .rm-measure { border-left-color: var(--border); color: var(--fg-dim); }
 .tl-body { flex: 1; overflow: auto; position: relative; min-width: 0; background-image: repeating-linear-gradient(to right, var(--border-dim) 0px, var(--border-dim) 1px, transparent 1px, transparent 80px); cursor: col-resize; }

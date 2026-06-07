@@ -58,6 +58,8 @@ const view = table(
     scrollLeft: t.u32(),
     createdAt: t.timestamp(),
     updatedAt: t.timestamp(),
+    loopStartBeat: t.f64(),
+    loopLengthBeats: t.f64(),
   }
 );
 
@@ -149,6 +151,7 @@ const block = table(
     assetId: t.u64(),
     startBeat: t.f64(),
     lengthBeats: t.f64(),
+    loopBeats: t.f64(),
     assetOffsetMicros: t.u64(),
     assetDurationMicros: t.u64(),
     gain: t.f64(),
@@ -326,6 +329,8 @@ export const createRoom = spacetimedb.reducer({ name: t.string(), displayName: t
     beatsPerBar: 4,
     zoom: 100,
     scrollLeft: 0,
+    loopStartBeat: 0,
+    loopLengthBeats: 0,
     createdAt: ctx.timestamp,
     updatedAt: ctx.timestamp,
   });
@@ -346,6 +351,8 @@ export const createRoom = spacetimedb.reducer({ name: t.string(), displayName: t
     beatsPerBar: 4,
     zoom: 100,
     scrollLeft: 0,
+    loopStartBeat: 0,
+    loopLengthBeats: 0,
     createdAt: ctx.timestamp,
     updatedAt: ctx.timestamp,
   });
@@ -388,6 +395,8 @@ export const joinRoom = spacetimedb.reducer({ token: t.string(), displayName: t.
       beatsPerBar: 4,
       zoom: 100,
       scrollLeft: 0,
+      loopStartBeat: 0,
+      loopLengthBeats: 0,
       createdAt: ctx.timestamp,
       updatedAt: ctx.timestamp,
     });
@@ -417,6 +426,8 @@ export const createSharedView = spacetimedb.reducer({ roomId: t.u64(), name: t.s
     beatsPerBar: 4,
     zoom: 100,
     scrollLeft: 0,
+    loopStartBeat: 0,
+    loopLengthBeats: 0,
     createdAt: ctx.timestamp,
     updatedAt: ctx.timestamp,
   });
@@ -429,6 +440,14 @@ export const updateViewTransport = spacetimedb.reducer(
   (ctx, { viewId, playState, playheadMicros, bpm }) => {
     const viewRow = requireViewEditor(ctx, viewId);
     ctx.db.view.id.update({ ...viewRow, playState, playheadMicros, bpm, updatedAt: ctx.timestamp });
+  }
+);
+
+export const updateViewLoopRegion = spacetimedb.reducer(
+  { viewId: t.u64(), loopStartBeat: t.f64(), loopLengthBeats: t.f64() },
+  (ctx, { viewId, loopStartBeat, loopLengthBeats }) => {
+    const viewRow = requireViewEditor(ctx, viewId);
+    ctx.db.view.id.update({ ...viewRow, loopStartBeat, loopLengthBeats, updatedAt: ctx.timestamp });
   }
 );
 
@@ -499,8 +518,8 @@ export const addAssetChunk = spacetimedb.reducer({ assetId: t.u64(), chunkIndex:
 });
 
 export const createBlock = spacetimedb.reducer(
-  { trackId: t.u64(), kind: t.string(), name: t.string(), instrumentKind: t.string(), instrumentKey: t.string(), assetId: t.u64(), startBeat: t.f64(), lengthBeats: t.f64(), midiJson: t.string() },
-  (ctx, { trackId, kind, name, instrumentKind, instrumentKey, assetId, startBeat, lengthBeats, midiJson }) => {
+  { trackId: t.u64(), kind: t.string(), name: t.string(), instrumentKind: t.string(), instrumentKey: t.string(), assetId: t.u64(), startBeat: t.f64(), lengthBeats: t.f64(), loopBeats: t.f64(), midiJson: t.string() },
+  (ctx, { trackId, kind, name, instrumentKind, instrumentKey, assetId, startBeat, lengthBeats, loopBeats, midiJson }) => {
     const trackRow = ctx.db.track.id.find(trackId);
     if (!trackRow) throw new SenderError('track not found');
     requireRoomEditor(ctx, trackRow.roomId);
@@ -514,6 +533,7 @@ export const createBlock = spacetimedb.reducer(
       assetId,
       startBeat,
       lengthBeats,
+      loopBeats,
       assetOffsetMicros: 0n,
       assetDurationMicros: 0n,
       gain: 1,
@@ -535,6 +555,7 @@ export const updateBlock = spacetimedb.reducer(
     name: t.string(),
     startBeat: t.f64(),
     lengthBeats: t.f64(),
+    loopBeats: t.f64(),
     assetOffsetMicros: t.u64(),
     assetDurationMicros: t.u64(),
     gain: t.f64(),
