@@ -1,116 +1,83 @@
-Get a SpacetimeDB React app running in under 5 minutes.
+# Ripple
+
+Ripple is a real-time collaborative music creation and sequencing tool built on [SpacetimeDB](https://spacetimedb.com). It allows multiple users to jam together, create tracks, upload audio assets, and sequence MIDI—all synchronized seamlessly in real-time. 
+
+Ripple leverages the [Strudel](https://strudel.cc/) audio engine for powerful synthesis and live-coding capabilities, entirely within the browser.
+
+## Features
+
+- **Real-time Collaboration:** Jam with your friends. Changes to tracks, blocks, and playback state are synchronized instantly using SpacetimeDB.
+- **Collaborative Rooms:** Create and join rooms with unique URLs to collaborate on different projects.
+- **Master & Personal Views:** See the shared "Master" view of the track or switch to your own personal view for independent auditioning.
+- **Audio Asset Uploads:** Upload your own audio samples to SpacetimeDB. Ripple chunks and stores the audio data, distributing it to everyone in the room.
+- **Strudel Integration:** Powered by Strudel for dynamic audio synthesis, sampling, and sequencing.
+- **Multi-track Sequencing:** Arrange audio and MIDI blocks on multiple tracks, control volume, panning, mute, and solo states.
+- **Automation:** Automate effects and parameters using bezier curves.
 
 ## Prerequisites
 
 - [Node.js](https://nodejs.org/) 18+ installed
 - [SpacetimeDB CLI](https://spacetimedb.com/install) installed
 
-Install the [SpacetimeDB CLI](https://spacetimedb.com/install) before continuing.
+## Getting Started
 
----
+1. **Install dependencies:**
+   ```bash
+   npm install
+   ```
 
-## Create your project
+2. **Start the SpacetimeDB local server (if not already running):**
+   ```bash
+   spacetime start
+   ```
 
-Run the `spacetime dev` command to create a new project with a SpacetimeDB module and React client.
+3. **Publish the SpacetimeDB module:**
+   ```bash
+   npm run spacetime:publish:local
+   ```
+   *Note: Ensure your SpacetimeDB local server is running.*
 
-This will start the local SpacetimeDB server, publish your module, generate TypeScript bindings, and start the React development server.
+4. **Generate the client bindings:**
+   ```bash
+   npm run spacetime:generate
+   ```
 
-```bash
-spacetime dev --template react-ts
+5. **Start the development server:**
+   ```bash
+   npm run dev
+   ```
+
+6. **Open your app:**
+   Navigate to [http://localhost:5173](http://localhost:5173) to start making music!
+
+## Project Structure
+
 ```
-
-
-
-## Open your app
-
-Navigate to [http://localhost:5173](http://localhost:5173) to see your app running.
-
-The template includes a basic React app connected to SpacetimeDB.
-
-
-
-## Explore the project structure
-
-Your project contains both server and client code.
-
-Edit `spacetimedb/src/index.ts` to add tables and reducers. Edit `client/src/App.tsx` to build your UI.
-
-```
-my-spacetime-app/
-├── spacetimedb/          # Your SpacetimeDB module
+ripple/
+├── spacetimedb/          # SpacetimeDB Server Module (Backend logic)
 │   └── src/
-│       └── index.ts      # Server-side logic
-├── client/               # React frontend
-│   └── src/
-│       ├── App.tsx
-│       └── module_bindings/  # Auto-generated types
-└── package.json
+│       └── index.ts      # Database schema and reducers
+├── src/                  # React Frontend (Client logic)
+│   ├── App.tsx           # Main application and UI
+│   ├── audioAssetCache.ts# Caching for downloaded audio chunks
+│   ├── audioUpload.ts    # Audio file chunking and uploading logic
+│   ├── audioRenderer.ts  # Web Audio API playback scheduling
+│   ├── strudelEngine.ts  # Strudel integration
+│   └── module_bindings/  # Auto-generated SpacetimeDB TypeScript bindings
+├── package.json          # Project configuration and scripts
+└── compose.ts / compose_simple.ts # Additional sequencing logic
 ```
 
+## Available Scripts
 
+- `npm run dev`: Starts the Vite development server.
+- `npm run build`: Compiles TypeScript and builds the frontend for production.
+- `npm run spacetime:generate`: Uses the SpacetimeDB CLI to generate TypeScript bindings from the module.
+- `npm run spacetime:publish:local`: Publishes the backend module to your local SpacetimeDB instance.
+- `npm run spacetime:publish`: Publishes the backend module to the SpacetimeDB main cloud.
 
-## Understand tables and reducers
+## Learn More
 
-Open `spacetimedb/src/index.ts` to see the module code. The template includes a `person` table and two reducers: `add` to insert a person, and `sayHello` to greet everyone.
-
-Tables store your data. Reducers are functions that modify data — they're the only way to write to the database.
-
-```typescript
-import { schema, table, t } from 'spacetimedb/server';
-
-const spacetimedb = schema({
-  person: table(
-    { public: true },
-    {
-      name: t.string(),
-    }
-  ),
-});
-export default spacetimedb;
-
-export const add = spacetimedb.reducer(
-  { name: t.string() },
-  (ctx, { name }) => {
-    ctx.db.person.insert({ name });
-  }
-);
-
-export const sayHello = spacetimedb.reducer(ctx => {
-  for (const person of ctx.db.person.iter()) {
-    console.info(`Hello, ${person.name}!`);
-  }
-  console.info('Hello, World!');
-});
-```
-
-
-
-## Test with the CLI
-
-Open a new terminal and navigate to your project directory. Then use the SpacetimeDB CLI to call reducers and query your data directly.
-
-```bash
-cd my-spacetime-app
-
-# Call the add reducer to insert a person
-spacetime call add Alice
-
-# Query the person table
-spacetime sql "SELECT * FROM person"
- name
----------
- "Alice"
-
-# Call sayHello to greet everyone
-spacetime call say_hello
-
-# View the module logs
-spacetime logs
-2025-01-13T12:00:00.000000Z  INFO: Hello, Alice!
-2025-01-13T12:00:00.000000Z  INFO: Hello, World!
-```
-
-## Next steps
-
-- See the [Chat App Tutorial](https://spacetimedb.com/docs/intro/tutorials/chat-app) for a complete example
-- Read the [TypeScript SDK Reference](https://spacetimedb.com/docs/intro/core-concepts/clients/typescript-reference) for detailed API docs
+- [SpacetimeDB Documentation](https://spacetimedb.com/docs)
+- [SpacetimeDB TypeScript SDK](https://spacetimedb.com/docs/intro/core-concepts/clients/typescript-reference)
+- [Strudel Documentation](https://strudel.cc/learn/getting-started/)
