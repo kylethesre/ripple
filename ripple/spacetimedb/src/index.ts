@@ -1,5 +1,13 @@
 import { SenderError, schema, table, t } from 'spacetimedb/server';
 
+const user = table(
+  { name: 'user', public: true },
+  {
+    identity: t.identity().primaryKey(),
+    name: t.string(),
+  }
+);
+
 const room = table(
   { name: 'room', public: true },
   {
@@ -226,6 +234,7 @@ const automationPoint = table(
 );
 
 const spacetimedb = schema({
+  user,
   room,
   roomMember,
   view,
@@ -298,17 +307,29 @@ function createViewTrackStates(ctx: any, viewId: bigint, roomId: bigint) {
   }
 }
 
-export const createRoom = spacetimedb.reducer({ name: t.string(), displayName: t.string() }, (ctx, { name, displayName }) => {
+export const registerUser = spacetimedb.reducer({ name: t.string() }, (ctx, { name }) => {
+  const existing = ctx.db.user.identity.find(ctx.sender);
+  if (existing) {
+    ctx.db.user.identity.update({ ...existing, name });
+  } else {
+    ctx.db.user.insert({ identity: ctx.sender, name });
+  }
+});
+
+export const createRoom = spacetimedb.reducer({ name: t.string() }, (ctx, { name }) => {
   const token = makeToken(ctx);
   ctx.db.room.insert({ id: 0n, token, name, owner: ctx.sender, createdAt: ctx.timestamp, updatedAt: ctx.timestamp });
   const roomRow = ctx.db.room.token.find(token);
   if (!roomRow) throw new SenderError('room creation failed');
 
+  const user = ctx.db.user.identity.find(ctx.sender);
+  const displayName = user ? user.name : 'Creator';
+
   ctx.db.roomMember.insert({
     id: 0n,
     roomId: roomRow.id,
     identity: ctx.sender,
-    displayName: displayName || 'Creator',
+    displayName,
     role: 'owner',
     active: true,
     joinedAt: ctx.timestamp,
@@ -360,9 +381,12 @@ export const createRoom = spacetimedb.reducer({ name: t.string(), displayName: t
   if (personal) createViewTrackStates(ctx, personal.id, roomRow.id);
 });
 
-export const joinRoom = spacetimedb.reducer({ token: t.string(), displayName: t.string() }, (ctx, { token, displayName }) => {
+export const joinRoom = spacetimedb.reducer({ token: t.string() }, (ctx, { token }) => {
   const roomRow = ctx.db.room.token.find(token);
   if (!roomRow) throw new SenderError('room not found');
+  const user = ctx.db.user.identity.find(ctx.sender);
+  const displayName = user ? user.name : 'Unknown';
+  
   const existing = memberFor(ctx, roomRow.id);
   if (existing) {
     ctx.db.roomMember.id.update({ ...existing, active: true, displayName, lastSeen: ctx.timestamp });

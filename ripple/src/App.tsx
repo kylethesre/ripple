@@ -216,8 +216,7 @@ function useRoomToken() {
 }
 
 function App() {
-  const [roomName, setRoomName] = useState('Midnight Drift');
-  const [displayName, setDisplayName] = useState('Alex');
+  const [globalName, setGlobalName] = useState('');
   const [activeViewId, setActiveViewId] = useState<bigint | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [newViewName, setNewViewName] = useState('Mix View');
@@ -237,12 +236,14 @@ function App() {
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [audioRenderRetry, setAudioRenderRetry] = useState(0);
-  const [joinDisplayName, setJoinDisplayName] = useState('');
+
   const tokenFromUrl = useRoomToken();
   const [page, setPage] = useState<'list' | 'workspace'>(tokenFromUrl ? 'workspace' : 'list');
   const [displayPlayheadMicros, setDisplayPlayheadMicros] = useState<bigint>(0n);
+  const [playbackRestartToken, setPlaybackRestartToken] = useState(0);
 
   const { isActive: connected, identity } = useSpacetimeDB();
+  const [users] = useTable(tables.user);
   const [rooms] = useTable(tables.room);
   const [members] = useTable(tables.roomMember);
   const [views] = useTable(tables.view);
@@ -250,10 +251,9 @@ function App() {
   const [trackStates] = useTable(tables.viewTrackState);
   const [blocks] = useTable(tables.block);
   const [assets] = useTable(tables.asset);
-  const [effects] = useTable(tables.effect);
-  const [automationLanes] = useTable(tables.automationLane);
-  const [automationPoints] = useTable(tables.automationPoint);
 
+
+  const registerUser = useReducer(reducers.registerUser);
   const createRoom = useReducer(reducers.createRoom);
   const joinRoom = useReducer(reducers.joinRoom);
   const createSharedView = useReducer(reducers.createSharedView);
@@ -267,8 +267,8 @@ function App() {
   const createBlock = useReducer(reducers.createBlock);
   const updateBlock = useReducer(reducers.updateBlock);
   const updateBlockMidi = useReducer(reducers.updateBlockMidi);
-  const addEffect = useReducer(reducers.addEffect);
-  const addAutomationLane = useReducer(reducers.addAutomationLane);
+
+
   const heartbeat = useReducer(reducers.heartbeat);
 
   useEffect(() => {
@@ -278,6 +278,8 @@ function App() {
     return () => window.clearInterval(interval);
   }, [connected, heartbeat]);
 
+  const myUser = useMemo(() => users.find(u => u.identity.toHexString() === identity?.toHexString()), [users, identity]);
+  
   const currentRoom = useMemo(() => {
     if (tokenFromUrl) return rooms.find(room => room.token === tokenFromUrl) ?? null;
     return rooms.find(room => room.owner.toHexString() === identity?.toHexString()) ?? rooms[0] ?? null;
@@ -380,7 +382,7 @@ function App() {
       localPlayheadRef.current = nextPlayhead;
       setDisplayPlayheadMicros(nextPlayhead);
 
-      if (now - lastSyncRef.current > 1000) {
+      if (now - lastSyncRef.current > 33) {
         lastSyncRef.current = now;
         const vid = viewIdRef.current;
         if (vid && playingRef.current) {
@@ -400,14 +402,31 @@ function App() {
     return () => cancelAnimationFrame(animationRef.current);
   }, [activeView?.id, activeView?.playState, activeView?.bpm, updateViewTransport]);
 
+  // Sync remote scrubs
+  useEffect(() => {
+    if (activeView?.playheadMicros !== undefined) {
+      const diff = Math.abs(Number(activeView.playheadMicros - localPlayheadRef.current));
+      if (activeView.playState !== 'playing') {
+        localPlayheadRef.current = activeView.playheadMicros;
+        setDisplayPlayheadMicros(activeView.playheadMicros);
+      } else if (diff > 500_000) {
+        // Significant jump while playing = remote scrub
+        localPlayheadRef.current = activeView.playheadMicros;
+        setDisplayPlayheadMicros(activeView.playheadMicros);
+        setPlaybackRestartToken(t => t + 1);
+      }
+    }
+  }, [activeView?.playState, activeView?.playheadMicros]);
+
   const scrubToPixel = useCallback((clientX: number, element: HTMLElement) => {
-    if (!activeView) return;
+    if (!activeView || !canEditView) return;
     const rect = element.getBoundingClientRect();
     const scrollLeft = element.scrollLeft ?? 0;
     const px = clientX - rect.left + scrollLeft;
     const micros = pixelsToMicros(px, activeView.bpm);
     localPlayheadRef.current = micros;
     setDisplayPlayheadMicros(micros);
+    if (activeView.playState === 'playing') setPlaybackRestartToken(t => t + 1);
     void updateViewTransport({ viewId: activeView.id, playState: activeView.playState, playheadMicros: micros, bpm: activeView.bpm });
   }, [activeView, updateViewTransport]);
 
@@ -529,7 +548,7 @@ function App() {
       cancelled = true;
       stopPlayback();
     };
-  }, [activeView?.playState, metronomeEnabled]);
+  }, [activeView?.playState, metronomeEnabled, playbackRestartToken]);
 
   // Update gains in real-time when mute/volume changes (no re-render needed)
   useEffect(() => {
@@ -584,45 +603,49 @@ function App() {
     return () => { window.removeEventListener('pointermove', onMove); window.removeEventListener('pointerup', onUp); blockDragRef.current = null; };
   }, [blockDrag]);
 
-  useEffect(() => {
-    if (!connected || !tokenFromUrl || !currentRoom) return;
-    if (roomMembers.some(member => member.identity.toHexString() === identity?.toHexString())) return;
-    setJoinDisplayName(displayName);
-  }, [connected, currentRoom, displayName, identity, roomMembers, tokenFromUrl]);
+
 
   const needsJoinPrompt = !!tokenFromUrl && !!currentRoom && !!connected && !roomMembers.some(member => member.identity.toHexString() === identity?.toHexString());
 
-  const submitJoin = (event: FormEvent) => {
-    event.preventDefault();
-    if (!tokenFromUrl || !joinDisplayName.trim()) return;
-    void joinRoom({ token: tokenFromUrl, displayName: joinDisplayName.trim() });
-    setJoinDisplayName('');
-  };
+
 
   useEffect(() => {
     if (!activeViewId && roomViews.length > 0) setActiveViewId((roomViews.find(view => view.kind === 'master') ?? roomViews[0]).id);
   }, [activeViewId, roomViews]);
 
-  const createProject = (event: FormEvent) => {
-    event.preventDefault();
-    if (!connected || !roomName.trim()) return;
-    void createRoom({ name: roomName.trim(), displayName: displayName.trim() || 'Creator' });
+  const createProject = (event?: FormEvent) => {
+    if (event) event.preventDefault();
+    if (!connected) return;
+    const ADJECTIVES = ['Neon', 'Synth', 'Retro', 'Digital', 'Analog', 'Cosmic', 'Electric', 'Sonic', 'Funky', 'Chill'];
+    const NOUNS = ['Studio', 'Jam', 'Beat', 'Track', 'Room', 'Vibe', 'Groove', 'Session', 'Lab', 'Space'];
+    const adj = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)];
+    const noun = NOUNS[Math.floor(Math.random() * NOUNS.length)];
+    void createRoom({ name: `${adj} ${noun}` });
   };
 
   const shareUrl = currentRoom ? `${window.location.origin}/r/${currentRoom.token}` : '';
   const activeMember = roomMembers.find(member => member.identity.toHexString() === identity?.toHexString());
   const canEdit = !!activeMember && activeMember.role !== 'viewer';
+  
+  const canEditView = useMemo(() => {
+    if (!activeView) return false;
+    if (activeView.owner.toHexString() === identity?.toHexString()) return true;
+    if (!activeView.locked && canEdit) return true;
+    if (activeView.kind !== 'personal' && canEdit) return true;
+    return false;
+  }, [activeView, identity, canEdit]);
+
   const selectedBlock = blocks.find(block => block.id === selectedBlockId) ?? null;
   const pianoRollBlock = blocks.find(block => block.id === openPianoRollBlockId) ?? null;
 
   const stateForTrack = (trackId: bigint) => activeTrackStates.find(state => state.trackId === trackId);
   const masterStateForTrack = (trackId: bigint) => masterTrackStates.find(state => state.trackId === trackId);
   const blocksForTrack = (trackId: bigint) => blocks.filter(block => block.trackId === trackId).sort((a, b) => a.startBeat - b.startBeat);
-  const effectsForTrack = (trackId: bigint) => effects.filter(effect => effect.targetKind === 'track' && effect.targetId === trackId);
-  const lanesForTrack = (trackId: bigint) => automationLanes.filter(lane => lane.targetKind === 'track' && lane.targetId === trackId && lane.visible);
+
+
 
   const setTransport = (playState: string, playheadMicros = activeView?.playheadMicros ?? 0n) => {
-    if (!activeView) return;
+    if (!activeView || !canEditView) return;
     playingRef.current = playState === 'playing';
     void updateViewTransport({ viewId: activeView.id, playState, playheadMicros, bpm: activeView.bpm });
   };
@@ -658,7 +681,7 @@ function App() {
   }, [updateViewTransport]);
 
   const toggleTrackMute = (trackId: bigint) => {
-    if (!activeView) return;
+    if (!activeView || !canEditView) return;
     const state = stateForTrack(trackId);
     void updateViewTrackState({
       viewId: activeView.id,
@@ -671,7 +694,7 @@ function App() {
   };
 
   const toggleTrackSolo = (trackId: bigint) => {
-    if (!activeView) return;
+    if (!activeView || !canEditView) return;
     const state = stateForTrack(trackId);
     void updateViewTrackState({
       viewId: activeView.id,
@@ -716,25 +739,7 @@ function App() {
     void renameTrackReducer({ trackId, name });
   };
 
-  const addAutomation = (trackId: bigint) => {
-    const trackEffects = effectsForTrack(trackId);
-    const latestEffect = trackEffects[trackEffects.length - 1];
-    if (!latestEffect) {
-      void addEffect({ targetKind: 'track', targetId: trackId, kind: 'filter', name: 'Filter', paramsJson: '{"cutoff":0.45}' });
-      return;
-    }
-    void addAutomationLane({
-      targetKind: 'track',
-      targetId: trackId,
-      effectId: latestEffect.id,
-      paramKey: 'cutoff',
-      label: 'cutoff',
-      minValue: 0,
-      maxValue: 1,
-      scale: 'linear',
-      color: 'var(--accent)',
-    });
-  };
+
 
   const handleFileUpload = async (file: File | null) => {
     if (!file || !currentRoom || !canEdit) return;
@@ -798,6 +803,25 @@ function App() {
     setPage('list');
   }, []);
 
+  if (connected && !myUser) {
+    return (
+      <main className="landing">
+        <div className="landing-card" style={{ maxWidth: 400 }}>
+          <div className="logo big">ripple<i /></div>
+          <h1>What should we call you?</h1>
+          <p>Enter a display name so others can identify you.</p>
+          <form className="create-room-form" onSubmit={e => {
+            e.preventDefault();
+            if (globalName.trim()) void registerUser({ name: globalName.trim() });
+          }}>
+            <input className="modal-input" autoFocus value={globalName} onChange={e => setGlobalName(e.target.value)} placeholder="Your name" />
+            <button className="modal-btn primary" disabled={!globalName.trim()}>Continue</button>
+          </form>
+        </div>
+      </main>
+    );
+  }
+
   if (page === 'list') {
     return (
       <main className="landing">
@@ -805,11 +829,9 @@ function App() {
           <div className="logo big">ripple<i /></div>
           <h1>Your Workspaces</h1>
           <p>Create a new collaborative DAW room or open an existing one.</p>
-          <form className="create-room-form" onSubmit={createProject}>
-            <input className="modal-input" value={roomName} onChange={event => setRoomName(event.target.value)} placeholder="New room name" />
-            <input className="modal-input" value={displayName} onChange={event => setDisplayName(event.target.value)} placeholder="Your display name" />
-            <button className="modal-btn primary" disabled={!connected || !roomName.trim()}>Create Room</button>
-          </form>
+          <div className="create-room-form">
+            <button className="modal-btn primary" onClick={() => createProject()} disabled={!connected}>Create Workspace</button>
+          </div>
           <div className="bs mono" style={{ marginBottom: 12 }}>Status <span>{connected ? 'Connected' : 'Disconnected'}</span></div>
           {myOwnedRooms.length > 0 ? (
             <div className="room-section">
@@ -859,13 +881,14 @@ function App() {
   if (needsJoinPrompt) {
     return (
       <div className="app-shell" style={{ display: 'grid', placeItems: 'center' }}>
-        <form className="modal" onSubmit={submitJoin}>
+        <form className="modal" onSubmit={e => {
+          e.preventDefault();
+          if (connected) void joinRoom({ token: currentRoom.token });
+        }}>
           <div className="modal-title">Join &ldquo;{currentRoom.name}&rdquo;</div>
-          <div className="modal-sub">Enter a display name so other collaborators can see you in this room.</div>
-          <label className="modal-label mono">Display Name</label>
-          <input className="modal-input" value={joinDisplayName} onChange={event => setJoinDisplayName(event.target.value)} placeholder="e.g. Kai" autoFocus />
+          <div className="modal-sub">You are about to join this workspace.</div>
           <div className="modal-actions">
-            <button className="modal-btn primary" type="submit" disabled={!joinDisplayName.trim() || !connected}>Join Room</button>
+            <button className="modal-btn primary" type="submit" disabled={!connected}>Join Room</button>
           </div>
           <div className="bs mono" style={{ marginTop: 8 }}>Identity <span>{shortId(identity?.toHexString())}</span></div>
         </form>
@@ -887,15 +910,29 @@ function App() {
         <button className="view-tab-add" onClick={() => setModalOpen(true)} title="New view">+</button>
       </div>
       <div className="transport">
-        <button className="t-btn" onClick={() => setTransport('stopped', 0n)}>⏮</button>
-        <button className={`t-btn ${activeView?.playState === 'playing' ? 'playing' : ''}`} onClick={() => setTransport(activeView?.playState === 'playing' ? 'paused' : 'playing')}>
+        <button className="t-btn" disabled={!canEditView} onClick={() => setTransport('stopped', 0n)}>⏮</button>
+        <button className={`t-btn ${activeView?.playState === 'playing' ? 'playing' : ''}`} disabled={!canEditView} onClick={() => setTransport(activeView?.playState === 'playing' ? 'paused' : 'playing')}>
           {activeView?.playState === 'playing' ? '⏸' : '▶'}
         </button>
-        <button className="t-btn rec">●</button>
-        <button className="t-btn" onClick={() => setTransport('stopped')}>⏹</button>
-        <button className={`t-btn ${metronomeEnabled ? 'playing' : ''}`} onClick={() => setMetronomeEnabled(!metronomeEnabled)} title="Metronome">🔔</button>
+
+        <button className="t-btn" disabled={!canEditView} onClick={() => setTransport('stopped')}>⏹</button>
+        <button className={`t-btn ${metronomeEnabled ? 'playing' : ''}`} onClick={() => setMetronomeEnabled(!metronomeEnabled)} title="Metronome">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="m10.1 2.3-4.5 16.4a2 2 0 0 0 1.9 2.5h9a2 2 0 0 0 1.9-2.5l-4.5-16.4a2 2 0 0 0-3.8 0Z" />
+            <path d="M12 2v20" />
+            <circle cx="12" cy="14" r="2" />
+          </svg>
+        </button>
         <div className="tc mono">{time.bar}<span className="bar">:</span>{time.beat}.<span className="ms">{time.tick}</span></div>
-        <button className="bpm-d mono" onClick={() => activeView && updateViewTransport({ viewId: activeView.id, playState: activeView.playState, playheadMicros: activeView.playheadMicros, bpm: activeView.bpm === 120 ? 128 : 120 })}>BPM <span>{activeView?.bpm ?? 120}</span></button>
+        <button className="bpm-d mono" disabled={!canEditView} onClick={() => {
+          if (!activeView || !canEditView) return;
+          const input = window.prompt('Enter new BPM (60-300):', String(activeView.bpm));
+          if (!input) return;
+          const newBpm = parseInt(input, 10);
+          if (!isNaN(newBpm) && newBpm >= 60 && newBpm <= 300) {
+            updateViewTransport({ viewId: activeView.id, playState: activeView.playState, playheadMicros: activeView.playheadMicros, bpm: newBpm });
+          }
+        }}>BPM <span>{activeView?.bpm ?? 120}</span></button>
         <div className="sp" />
         <label className="master-volume mono">Master <input type="range" min="0" max="1" step="0.01" value={masterVolume} onChange={event => setMasterVolume(Number(event.target.value))} /></label>
         <div className="view-meta">
@@ -924,9 +961,9 @@ function App() {
                 const laneHasMidi = trackBlocks.some(block => block.kind !== 'audio');
                 return (
                   <div key={String(track.id)} className={`${laneHasAudio ? 'th-audio' : 'th-midi'} ${muted ? 'muted' : ''} th`}>
-                    <div className="tn"><div className={`t-icon ${laneHasAudio ? 'audio' : 'midi'}`}>{laneHasAudio ? '♫' : 'M'}</div><input className="track-name-input" value={track.name} onChange={event => renameTrack(track.id, event.target.value)} /></div>
+                    <div className="tn"><div className={`t-icon ${laneHasAudio ? 'audio' : 'midi'}`}>{laneHasAudio ? '♫' : 'M'}</div><input className="track-name-input" disabled={!canEdit} value={track.name} onChange={event => renameTrack(track.id, event.target.value)} /></div>
                     {laneHasMidi ? <div className="midi-meta"><span className="midi-chan mono">MIDI</span><span className="midi-chan mono">Block</span></div> : null}
-                    <div className="tc2"><button className={`tb ${solo ? 'tb-a' : ''}`} onClick={() => toggleTrackSolo(track.id)}>S</button><button className={`tb ${muted ? 'tb-m' : ''}`} onClick={() => toggleTrackMute(track.id)}>M</button></div>
+                    <div className="tc2"><button className={`tb ${solo ? 'tb-a' : ''}`} disabled={!canEditView} onClick={() => toggleTrackSolo(track.id)}>S</button><button className={`tb ${muted ? 'tb-m' : ''}`} disabled={!canEditView} onClick={() => toggleTrackMute(track.id)}>M</button></div>
                     <div className="meter"><div className="meter-f" style={{ width: activeView?.playState === 'playing' && !muted ? `${35 + ((Number(track.id) * 11) % 55)}%` : '8%' }} /></div>
                     <div className="view-overrides">{differsFromMaster ? <div className="vo-dot" /> : null}{trackBlocks.some(block => block.kind !== 'audio') ? <div className="vo-dot auto" /> : null}</div>
                   </div>
@@ -946,6 +983,7 @@ function App() {
             <div className="ruler" ref={timelineRulerRef} 
               onPointerDown={event => {
                 if (event.button === 2) {
+                  if (!canEditView) return;
                   const rect = event.currentTarget.getBoundingClientRect();
                   const clickX = event.clientX - rect.left + event.currentTarget.scrollLeft;
                   const beat = Math.round(clickX / BEAT_WIDTH);
@@ -1034,13 +1072,13 @@ function App() {
                     const left = block.startBeat * BEAT_WIDTH;
                     const width = block.lengthBeats * BEAT_WIDTH;
                     const onBlockPointerDown = (event: React.PointerEvent) => {
-                      if (event.button !== 0) return;
+                      if (event.button !== 0 || !canEdit) return;
                       event.stopPropagation();
                       setSelectedBlockId(block.id);
                       setBlockDrag({ blockId: block.id, mode: 'move', originX: event.clientX, startBeat: block.startBeat, lengthBeats: block.lengthBeats });
                     };
                     const onResizePointerDown = (event: React.PointerEvent) => {
-                      if (event.button !== 0) return;
+                      if (event.button !== 0 || !canEdit) return;
                       event.stopPropagation();
                       setSelectedBlockId(block.id);
                       setBlockDrag({ blockId: block.id, mode: 'resize', originX: event.clientX, startBeat: block.startBeat, lengthBeats: block.lengthBeats });
@@ -1078,21 +1116,14 @@ function App() {
                       </button>
                     );
                   })}
-                  {lanesForTrack(track.id).map(lane => (
-                    <div className="automation-subtrack" key={String(lane.id)}>
-                      <span className="auto-label mono">{lane.label}</span>
-                      <svg viewBox="0 0 1200 30" preserveAspectRatio="none">
-                        <polyline points={automationPoints.filter(point => point.laneId === lane.id).sort((a, b) => a.beat - b.beat).map(point => `${point.beat * 20},${28 - ((point.value - lane.minValue) / Math.max(0.001, lane.maxValue - lane.minValue)) * 24}`).join(' ') || '0,24 320,8 640,20'} />
-                      </svg>
-                    </div>
-                  ))}
+
                 </div>
               );
             })}
           </div>
         </div>
         <div className="rp">
-          <div className="ptabs"><button className="ptab ptab-a">Mixer</button><button className="ptab">FX</button><button className="ptab">Files</button></div>
+          <div className="ptabs"><button className="ptab ptab-a">Mixer</button></div>
           <div className="pcont">
             {roomTracks.map(track => {
               const state = stateForTrack(track.id);
@@ -1103,7 +1134,7 @@ function App() {
                   <div className="ch-hd"><div className="ch-n"><span>{track.name}</span><span className="ch-type">LANE</span></div><div className="ch-db mono">{volumeToDb(volume, muted)}</div></div>
                   <input className="fader-input" type="range" min="0" max="1" step="0.01" value={volume} onChange={event => setTrackVolume(track.id, Number(event.target.value))} />
                   <div className="ch-meter"><div className="ch-meter-f" style={{ width: activeView?.playState === 'playing' && !muted ? `${25 + ((Number(track.id) * 9) % 65)}%` : '4%' }} /></div>
-                  <button className="mini-link" onClick={() => addAutomation(track.id)}>+ automation lane</button>
+
                 </div>
               );
             })}

@@ -12,5 +12,4 @@ import {
 
 export default {
   token: __t.string(),
-  displayName: __t.string(),
 };

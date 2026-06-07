@@ -134,6 +134,12 @@ export const Track = __t.object("Track", {
 });
 export type Track = __Infer<typeof Track>;
 
+export const User = __t.object("User", {
+  identity: __t.identity(),
+  name: __t.string(),
+});
+export type User = __Infer<typeof User>;
+
 export const View = __t.object("View", {
   id: __t.u64(),
   roomId: __t.u64(),

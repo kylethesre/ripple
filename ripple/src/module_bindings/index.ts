@@ -44,6 +44,7 @@ import CreateSharedViewReducer from "./create_shared_view_reducer";
 import CreateTrackReducer from "./create_track_reducer";
 import HeartbeatReducer from "./heartbeat_reducer";
 import JoinRoomReducer from "./join_room_reducer";
+import RegisterUserReducer from "./register_user_reducer";
 import RenameTrackReducer from "./rename_track_reducer";
 import SetDisplayNameReducer from "./set_display_name_reducer";
 import UpdateBlockReducer from "./update_block_reducer";
@@ -66,6 +67,7 @@ import EffectRow from "./effect_table";
 import RoomRow from "./room_table";
 import RoomMemberRow from "./room_member_table";
 import TrackRow from "./track_table";
+import UserRow from "./user_table";
 import ViewRow from "./view_table";
 import ViewTrackStateRow from "./view_track_state_table";
 
@@ -223,6 +225,17 @@ const tablesSchema = __schema({
       { name: 'track_id_key', constraint: 'unique', columns: ['id'] },
     ],
   }, TrackRow),
+  user: __table({
+    name: 'user',
+    indexes: [
+      { accessor: 'identity', name: 'user_identity_idx_btree', algorithm: 'btree', columns: [
+        'identity',
+      ] },
+    ],
+    constraints: [
+      { name: 'user_identity_key', constraint: 'unique', columns: ['identity'] },
+    ],
+  }, UserRow),
   view: __table({
     name: 'view',
     indexes: [
@@ -273,6 +286,7 @@ const reducersSchema = __reducers(
   __reducerSchema("create_track", CreateTrackReducer),
   __reducerSchema("heartbeat", HeartbeatReducer),
   __reducerSchema("join_room", JoinRoomReducer),
+  __reducerSchema("register_user", RegisterUserReducer),
   __reducerSchema("rename_track", RenameTrackReducer),
   __reducerSchema("set_display_name", SetDisplayNameReducer),
   __reducerSchema("update_block", UpdateBlockReducer),
